@@ -1,7 +1,0 @@
-## Interface: 120007
-## Title: IncomingCC
-## Notes: Cast bars for crowd control being cast on you in arena
-## Version: 0.1
-## SavedVariables: IncomingCCDB
-
-IncomingCC.lua

@@ -1,0 +1,7 @@
+## Interface: 120007
+## Title: ArenaPetCasts
+## Notes: Cast bars for enemy arena pets casting at you
+## Version: 0.1
+## SavedVariables: ArenaPetCastsDB
+
+ArenaPetCasts.lua
