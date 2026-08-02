@@ -17,6 +17,12 @@ local ART_REGIONS = {
     "Shine", "StandardGlow", "TextBorder", "WispGlow", "WispMask",
 }
 
+-- Classes that can bring a pet into arena. Only warlock is on by default.
+local PET_CLASSES = {
+    "WARLOCK", "HUNTER", "MAGE", "DEATHKNIGHT",
+    "SHAMAN", "PRIEST", "DRUID", "MONK",
+}
+
 local defaults = {
     barWidth    = 220,
     barHeight   = 20,
@@ -24,7 +30,7 @@ local defaults = {
     barColor    = { 1.0, 0.7, 0.0 },
     bgAlpha     = 0,
     onlyAtMe    = true,
-    warlockOnly = true,
+    petClasses  = { WARLOCK = true },
     showIcon    = true,
     locked      = true,
     point       = { "CENTER", "CENTER", 0, 150 },
@@ -84,9 +90,13 @@ local function CreateBar(index)
         hooksecurefunc(bar, "SetIsHighlightedCastTarget", function(self, isTarget)
             if previewing or not db.onlyAtMe then return end
             for _, region in ipairs(self.dimRegions) do
+                local ok = false
                 if region.SetAlphaFromBoolean then
-                    pcall(region.SetAlphaFromBoolean, region, isTarget, 1, 0)
+                    ok = pcall(region.SetAlphaFromBoolean, region, isTarget, 1, 0)
                 end
+                -- If the secret-safe setter is missing or refuses the value,
+                -- leave the region visible rather than stuck at alpha 0.
+                if not ok then region:SetAlpha(1) end
             end
         end)
     end
@@ -151,23 +161,47 @@ end
 
 -- issecretvalue returns an ordinary boolean, so it is safe to branch on and
 -- tells us whether the class came back readable before trusting it.
-local function IsWarlockPet(index)
-    local owner = "arena" .. index
+-- Resolved once per match and cached. Spec data arrives during prep and stays
+-- valid for the rest of the game, so re-deriving it on every roster event -
+-- which is what ARENA_OPPONENT_UPDATE fires on a death - risks a lookup that
+-- worked at prep failing later and unbinding a bar mid-game.
+local classCache = {}
 
-    local class = UnitClassBase and UnitClassBase(owner)
-    if class and not issecretvalue(class) then
-        return class == "WARLOCK"
-    end
+local function ResolveClass(index)
+    if classCache[index] then return classCache[index] end
 
-    if GetArenaOpponentSpec and GetSpecializationInfoByID then
-        local specID = GetArenaOpponentSpec(index)
-        if specID and specID > 0 then
-            local _, _, _, _, _, classFile = GetSpecializationInfoByID(specID)
-            return classFile == "WARLOCK"
+    -- Spec API first: it is the route sArena treats as authoritative, and the
+    -- count guard stops us asking before the data exists.
+    if GetNumArenaOpponentSpecs and GetArenaOpponentSpec and GetSpecializationInfoByID then
+        if GetNumArenaOpponentSpecs() >= index then
+            local specID = GetArenaOpponentSpec(index) or 0
+            if specID > 0 then
+                local _, _, _, _, _, classFile = GetSpecializationInfoByID(specID)
+                if classFile then
+                    classCache[index] = classFile
+                    return classFile
+                end
+            end
         end
     end
 
-    return false
+    -- Live unit lookup as a last resort. issecretvalue returns an ordinary
+    -- boolean, so it is safe to branch on.
+    local class = UnitClassBase and UnitClassBase("arena" .. index)
+    if class and not issecretvalue(class) then
+        classCache[index] = class
+        return class
+    end
+
+    return nil
+end
+
+local function ShouldShowPet(index)
+    local class = ResolveClass(index)
+    -- Unknown class shows the bar. An unwanted bar beats an addon that
+    -- silently displays nothing, and the class usually resolves a moment later.
+    if not class then return true end
+    return db.petClasses[class] == true
 end
 
 -- Binding a bar to nil unregisters its events, which is how a non-warlock pet
@@ -181,7 +215,7 @@ local function RefreshUnits()
         local bar = bars[i]
         local wanted = UNITS[i]
 
-        if db.warlockOnly and not IsWarlockPet(i) then
+        if not ShouldShowPet(i) then
             wanted = nil
         end
 
@@ -337,7 +371,17 @@ local function BuildSettings()
 
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Filtering"))
     AddCheckbox(category, "onlyAtMe",    "Only Casts At Me",  "Hide bars for pet casts aimed at someone else.",   RefreshVisuals)
-    AddCheckbox(category, "warlockOnly", "Warlock Pets Only", "Ignore hunter, mage, death knight and other pets.", RefreshVisuals)
+
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Pet Classes"))
+    for _, class in ipairs(PET_CLASSES) do
+        local label = class:sub(1, 1) .. class:sub(2):lower()
+        local setting = Settings.RegisterAddOnSetting(
+            category, ADDON_NAME .. "_pet_" .. class, class, db.petClasses,
+            "boolean", label, defaults.petClasses[class] == true
+        )
+        Settings.CreateCheckbox(category, setting, "Show cast bars for " .. label .. " pets.")
+        setting:SetValueChangedCallback(RefreshVisuals)
+    end
 
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Position"))
     AddCheckbox(category, "locked", "Lock Position", "Prevent the bars from being dragged.", ApplyLock)
@@ -364,6 +408,12 @@ local function Initialize()
     db = ArenaPetCastsDB
     for k, v in pairs(defaults) do
         if db[k] == nil then db[k] = v end
+    end
+    db.petClasses = db.petClasses or {}
+    for _, class in ipairs(PET_CLASSES) do
+        if db.petClasses[class] == nil then
+            db.petClasses[class] = defaults.petClasses[class] == true
+        end
     end
 
     container = CreateFrame("Frame", "ArenaPetCastsAnchor", UIParent)
@@ -414,8 +464,12 @@ events:SetScript("OnEvent", function(self, event, arg1)
         return
     end
 
-    -- Opponent classes aren't known until prep, so rebind whenever the roster
-    -- or the zone changes.
+    -- Opponents change between matches, so the cache only survives one game.
+    if event == "PLAYER_ENTERING_WORLD" then
+        wipe(classCache)
+    end
+
+    -- Classes aren't known until prep, so keep retrying until they resolve.
     RefreshUnits()
 end)
 
@@ -445,6 +499,18 @@ SlashCmdList.ARENAPETCASTS = function(msg)
 
     elseif msg == "color" or msg == "colour" then
         OpenColorPicker()
+
+    elseif msg == "status" then
+        Print("bars bound:")
+        for i = 1, NUM_BARS do
+            local bar = bars[i]
+            Print(string.format("  %s  unit=%s  class=%s  shown=%s",
+                UNITS[i], tostring(bar.unit),
+                tostring(classCache[i] or "unresolved"), tostring(bar:IsShown())))
+        end
+        Print(string.format("onlyAtMe=%s bgAlpha=%s specs=%s",
+            tostring(db.onlyAtMe), tostring(db.bgAlpha),
+            tostring(GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs())))
 
     elseif msg == "reset" then
         db.point = nil
