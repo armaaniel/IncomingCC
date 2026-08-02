@@ -17,6 +17,19 @@ local COLOR     = { 1.00, 0.70, 0.00 }
 local CC_COLOR  = { 0.90, 0.20, 0.20 }
 local TEXTURE   = "Interface\\TargetingFrame\\UI-StatusBar"
 
+-- Cast timestamps are secret, so real progress is unavailable. The bar fills
+-- against this assumed duration instead. The elapsed counter beside it is
+-- exact - it comes from GetTime(), which is not secret - so trust the number
+-- over the bar when they disagree.
+local ASSUMED_CAST = 1.5
+
+-- Channels are the aftermath, not the warning. Seduction is cast first and
+-- channels once it has landed - by then you are already crowd controlled and
+-- the bar tells you nothing you can act on. A channel also runs far longer
+-- than ASSUMED_CAST, so its bar would empty immediately and then sit at zero.
+-- Set true if you want them anyway.
+local SHOW_CHANNELS = false
+
 local bars, visible, classCache = {}, {}, {}
 local container, db
 
@@ -82,8 +95,14 @@ local function CreateBar()
     text:SetJustifyH("LEFT")
     bar.text = text
 
+    local timer = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    timer:SetPoint("RIGHT", bar, "RIGHT", -5, 0)
+    timer:SetJustifyH("RIGHT")
+    bar.timer = timer
+    text:SetPoint("RIGHT", bar, "RIGHT", -42, 0)
+
     -- Dimmed together when the cast is not aimed at us.
-    bar.regions = { bar:GetStatusBarTexture(), icon, text }
+    bar.regions = { bar:GetStatusBarTexture(), icon, text, timer }
     return bar
 end
 
@@ -101,11 +120,32 @@ end
 
 local testUnit  -- set by /apc testunit; bypasses the warlock filter
 
+local ticker = CreateFrame("Frame")
+ticker:Hide()
+ticker:SetScript("OnUpdate", function()
+    local any = false
+    for i, bar in ipairs(bars) do
+        if visible[i] and bar.startedAt then
+            local elapsed = GetTime() - bar.startedAt
+            local progress = math.min(elapsed / ASSUMED_CAST, 1)
+            -- Channels drain rather than fill. Seduction is a channel, so this
+            -- covers the spell the addon mostly exists for.
+            bar:SetValue(bar.channeling and (1 - progress) or progress)
+            bar.timer:SetFormattedText("%.1f", elapsed)
+            any = true
+        end
+    end
+    if not any then ticker:Hide() end
+end)
+
 local function ShowCast(index, unit)
     if unit ~= testUnit and not IsWarlock(index) then return end
 
+    local channeling = false
     local name, _, texture, _, _, _, _, _, spellID = UnitCastingInfo(unit)
     if not name then
+        if not SHOW_CHANNELS then return end
+        channeling = true
         name, _, texture, _, _, _, _, spellID = UnitChannelInfo(unit)
     end
     if not name then return end   -- nil tests on secrets are permitted
@@ -150,13 +190,23 @@ local function ShowCast(index, unit)
         for _, region in ipairs(bar.regions) do region:SetAlpha(1) end
     end
 
+    -- GetTime() is not secret, so elapsed time can be measured even though the
+    -- cast's own start and end stamps cannot be read.
+    bar.startedAt = GetTime()
+    bar.channeling = channeling
+    bar:SetValue(channeling and 1 or 0)
+    bar.timer:SetText("0.0")
+
     visible[index] = true
     bar:Show()
     Restack()
+    ticker:Show()
 end
 
 local function HideCast(index)
     visible[index] = false
+    bars[index].startedAt = nil
+    bars[index].channeling = nil
     bars[index]:Hide()
     Restack()
 end
@@ -177,6 +227,9 @@ local function SetLocked(locked)
         if not locked then
             bar.icon:SetTexture(136174)
             bar.text:SetText("Preview " .. i)
+            bar.timer:SetText("0.8")
+            bar.startedAt = nil
+            bar:SetValue(0.55)
             for _, r in ipairs(bar.regions) do r:SetAlpha(1) end
             visible[i] = true
             bar:Show()
