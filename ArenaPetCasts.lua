@@ -148,6 +148,7 @@ function Restack()
     end
 end
 
+local RegisterPetEvents
 local testUnit  -- set by /apc testunit; bypasses the warlock filter
 local debugging = false
 
@@ -377,6 +378,24 @@ local STOP  = {
 local indexOf = {}
 
 local f = CreateFrame("Frame")
+
+-- Re-run whenever the arena roster changes. RegisterUnitEvent appears to bind
+-- against the unit as it exists at registration time, so registering once at
+-- load - out in the world, where no arenapet token resolves - leaves the
+-- filter attached to nothing. sArena re-registers from its per-frame setup for
+-- the same reason, and additionally watches UNIT_PET on each owner to catch
+-- the moment an opponent's pet appears.
+function RegisterPetEvents()
+    for event in pairs(START) do
+        for _, unit in ipairs(UNITS) do f:RegisterUnitEvent(event, unit) end
+    end
+    for event in pairs(STOP) do
+        for _, unit in ipairs(UNITS) do f:RegisterUnitEvent(event, unit) end
+    end
+    for i = 1, #UNITS do
+        f:RegisterUnitEvent("UNIT_PET", "arena" .. i)
+    end
+end
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("ARENA_OPPONENT_UPDATE")
@@ -416,9 +435,8 @@ f:SetScript("OnEvent", function(self, event, arg1)
         for i, unit in ipairs(UNITS) do
             bars[i] = CreateBar()
             indexOf[unit] = i
-            for event in pairs(START) do self:RegisterUnitEvent(event, unit) end
-            for event in pairs(STOP)  do self:RegisterUnitEvent(event, unit) end
         end
+        RegisterPetEvents()
 
         ApplyLayout()
         ApplyStyle()
@@ -437,8 +455,15 @@ f:SetScript("OnEvent", function(self, event, arg1)
     elseif STOP[event] then
         local i = indexOf[arg1]
         if i and db.locked then HideCast(i) end
+    elseif event == "UNIT_PET" then
+        Debug("UNIT_PET for %s - rebinding", tostring(arg1))
+        if not testUnit then RegisterPetEvents() end
+
     else
         if event == "PLAYER_ENTERING_WORLD" then wipe(classCache) end
+        -- Rebind on every roster change: the tokens only resolve once the
+        -- units actually exist.
+        if not testUnit and not debugging then RegisterPetEvents() end
         if db.locked then HideAll() end
     end
 end)
@@ -466,12 +491,8 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         end
         if unit == "off" then
             if testUnit then
-                f:UnregisterEvent("UNIT_SPELLCAST_START")
-                f:UnregisterEvent("UNIT_SPELLCAST_CHANNEL_START")
-                for event in pairs(START) do
-                    for _, u in ipairs(UNITS) do f:RegisterUnitEvent(event, u) end
-                end
                 testUnit = nil
+                RegisterPetEvents()
                 HideAll()
             end
             print("|cffffb300ArenaPetCasts|r test binding cleared")
@@ -499,12 +520,7 @@ SlashCmdList.ARENAPETCASTS = function(msg)
             print("|cff66ccffAPC|r debug ON - all spellcast units will be logged")
             print("  run an arena, then /apc debug again to turn it off")
         else
-            for event in pairs(START) do
-                for _, u in ipairs(UNITS) do f:RegisterUnitEvent(event, u) end
-            end
-            for event in pairs(STOP) do
-                for _, u in ipairs(UNITS) do f:RegisterUnitEvent(event, u) end
-            end
+            RegisterPetEvents()
             print("|cff66ccffAPC|r debug OFF")
         end
 
