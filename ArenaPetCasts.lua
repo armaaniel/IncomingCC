@@ -94,15 +94,25 @@ local function CreateBar(index)
     return bar
 end
 
+-- Anchors a list of bars consecutively from the top of the container. Bars are
+-- positioned by how many are actually in use, not by their arena index, so a
+-- lone warlock pet always renders in the top slot rather than leaving gaps.
+local function PositionBars(active)
+    local h, gap = db.barHeight, db.barGap
+    for i, bar in ipairs(active) do
+        bar:ClearAllPoints()
+        bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -((i - 1) * (h + gap)))
+    end
+    container:SetHeight(math.max(1, #active) * (h + gap))
+end
+
 function ApplyLayout()
-    local w, h, gap = db.barWidth, db.barHeight, db.barGap
-    container:SetSize(w, NUM_BARS * (h + gap))
+    local w, h = db.barWidth, db.barHeight
+    container:SetWidth(w)
 
     for i = 1, NUM_BARS do
         local bar = bars[i]
         bar:SetSize(w, h)
-        bar:ClearAllPoints()
-        bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -((i - 1) * (h + gap)))
 
         if bar.Icon then
             bar.Icon:SetSize(h, h)
@@ -165,6 +175,8 @@ end
 local function RefreshUnits()
     if previewing then return end
 
+    local active = {}
+
     for i = 1, NUM_BARS do
         local bar = bars[i]
         local wanted = UNITS[i]
@@ -174,13 +186,17 @@ local function RefreshUnits()
         end
 
         bar:SetUnit(wanted, false, true)
-        if wanted and bar.SetHighlightWhenCastTarget then
-            bar:SetHighlightWhenCastTarget(db.onlyAtMe)
-        end
-        if not wanted then
+        if wanted then
+            if bar.SetHighlightWhenCastTarget then
+                bar:SetHighlightWhenCastTarget(db.onlyAtMe)
+            end
+            active[#active + 1] = bar
+        else
             bar:Hide()
         end
     end
+
+    PositionBars(active)
 end
 
 --------------------------------------------------------------------------------
@@ -212,6 +228,10 @@ local PREVIEW = {
 
 function SetPreview(enabled)
     previewing = enabled
+
+    if enabled then
+        PositionBars(bars)
+    end
 
     for i = 1, NUM_BARS do
         local bar = bars[i]
