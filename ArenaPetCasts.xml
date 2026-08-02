@@ -1,0 +1,80 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+
+    <!--
+        The frame, its regions, its mixin and its scripts are all declared here
+        rather than assembled in Lua. The game's XML loader does the wiring,
+        which is the one structural difference between this and the pure-Lua
+        version that CastingBarMixin refuses to run under.
+
+        Region names are the parentKeys CastingBarMixin expects. Flash is never
+        shown but the generic cast bar code assumes it exists.
+    -->
+    <StatusBar name="ArenaPetCastsBarTemplate"
+               mixin="CastingBarMixin"
+               inherits="CastingBarFrameAnimsTemplate"
+               virtual="true"
+               hidden="true">
+
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Background" setAllPoints="true">
+                    <Color r="0" g="0" b="0" a="1"/>
+                </Texture>
+            </Layer>
+
+            <Layer level="ARTWORK">
+                <Texture parentKey="BorderShield"
+                         file="Interface\CastingBar\UI-CastingBar-Arena-Shield"
+                         hidden="true">
+                    <Size x="42" y="42"/>
+                    <Anchors>
+                        <Anchor point="LEFT" x="-25" y="0"/>
+                    </Anchors>
+                </Texture>
+
+                <FontString parentKey="Text"
+                            inherits="GameFontHighlightSmall"
+                            setAllPoints="true"/>
+
+                <Texture parentKey="Icon">
+                    <Size x="16" y="16"/>
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="LEFT" x="-5" y="0"/>
+                    </Anchors>
+                </Texture>
+            </Layer>
+
+            <Layer level="OVERLAY">
+                <Texture parentKey="Spark"
+                         file="Interface\CastingBar\UI-CastingBar-Spark"
+                         alphaMode="ADD">
+                    <Size x="16" y="30"/>
+                    <Anchors>
+                        <Anchor point="CENTER"/>
+                    </Anchors>
+                </Texture>
+
+                <Texture parentKey="Flash" alphaMode="ADD">
+                    <Size x="256" y="64"/>
+                    <Anchors>
+                        <Anchor point="TOP" x="0" y="28"/>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+
+        <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+        <BarColor r="1.0" g="0.7" b="0.0"/>
+
+        <Scripts>
+            <OnLoad>
+                self:OnLoad(nil, true, false);
+            </OnLoad>
+            <OnEvent method="OnEvent"/>
+            <OnUpdate method="OnUpdate"/>
+            <OnShow method="OnShow"/>
+        </Scripts>
+
+    </StatusBar>
+
+</Ui>

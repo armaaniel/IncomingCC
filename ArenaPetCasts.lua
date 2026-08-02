@@ -44,93 +44,21 @@ local slots = {}
 -- resolves PlayerIsSpellTarget internally. It runs untainted, so it is allowed
 -- to read secret values that addon code cannot touch. We only restyle it.
 local function CreateBar(index)
-    -- Inherit only the animation template and mix in the methods, exactly as
-    -- sArena does. Inheriting CastingBarFrameTemplate instead grafts an addon
-    -- frame onto Blizzard's own player castbar object, which taints it and
-    -- produces "Interface action failed because of an addon".
+    -- Everything about the frame - regions, mixin, scripts - comes from the
+    -- XML template. Building it here in Lua is what made CastingBarMixin throw
+    -- on secret access, so this file must not touch that wiring.
     local bar = CreateFrame(
         "StatusBar",
         "ArenaPetCastBar" .. index,
         container,
-        "CastingBarFrameAnimsTemplate"
+        "ArenaPetCastsBarTemplate"
     )
-    Mixin(bar, CastingBarMixin)
 
-    -- CastingBarType's values are secretwrap()'d, so CastingBarTypeInfo is
-    -- keyed by secrets. Tainted code cannot index it, iterate it, or compare
-    -- anything against the enum. Six mixin methods do one of those; all of
-    -- them only pick cosmetic atlas art and effect textures we do not use, so
-    -- replacing them costs nothing. Mixin copies functions onto the frame, so
-    -- these instance overrides take precedence over the originals.
-    local FLAT_TYPE_INFO = { filling = "", full = "", glow = "" }
-
-    bar.GetTypeInfo = function()
-        return FLAT_TYPE_INFO
-    end
-    bar.IsInterruptable = function()
-        return true
-    end
-    bar.PlayFinishAnim = function() end
-    bar.StopFinishAnims = function(self)
-        if self.HoldFadeOutAnim then self.HoldFadeOutAnim:Stop() end
-        if self.FadeOutAnim then self.FadeOutAnim:Stop() end
-        if self.Flash then self.Flash:SetAlpha(0) end
-    end
-    bar.ShowSpark = function(self)
-        if self.Spark then self.Spark:Show() end
-    end
-    bar.HideSpark = function(self)
-        if self.Spark then self.Spark:Hide() end
-    end
-
-    bar:SetStatusBarTexture(BAR_TEXTURE)
-
-    local bg = bar:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0, 0, 0, 1)
-    bar.Background = bg
-
-    local shield = bar:CreateTexture(nil, "ARTWORK")
-    shield:SetTexture("Interface\\CastingBar\\UI-CastingBar-Arena-Shield")
-    shield:SetSize(42, 42)
-    shield:SetPoint("LEFT", bar, "LEFT", -25, 0)
-    shield:Hide()
-    bar.BorderShield = shield
-
-    local text = bar:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    text:SetAllPoints()
-    bar.Text = text
-
-    local icon = bar:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(16, 16)
-    icon:SetPoint("RIGHT", bar, "LEFT", -5, 0)
-    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-    bar.Icon = icon
-
-    local spark = bar:CreateTexture(nil, "OVERLAY")
-    spark:SetTexture("Interface\\CastingBar\\UI-CastingBar-Spark")
-    spark:SetBlendMode("ADD")
-    spark:SetSize(16, 30)
-    spark:SetPoint("CENTER")
-    bar.Spark = spark
-
-    -- sArena's XML notes this one is required for the generic unit frame code
-    -- to behave, even though we never show it.
-    local flash = bar:CreateTexture(nil, "OVERLAY")
-    flash:SetBlendMode("ADD")
-    flash:SetSize(256, 64)
-    flash:SetPoint("TOP", bar, "TOP", 0, 28)
-    bar.Flash = flash
-
-    -- The mixin's scripts are not attached by Mixin(); they have to be wired
-    -- up the way the XML does it.
-    bar:SetScript("OnEvent", bar.OnEvent)
-    bar:SetScript("OnUpdate", bar.OnUpdate)
-    bar:SetScript("OnShow", bar.OnShow)
-    bar:OnLoad(nil, true, false)
-    bar:Hide()
-
-    bar.dimRegions = { bar:GetStatusBarTexture(), icon, spark, text, shield }
+    -- Regions dimmed together when the cast is not aimed at us. The background
+    -- is excluded so its own opacity setting still applies.
+    bar.dimRegions = {
+        bar:GetStatusBarTexture(), bar.Icon, bar.Spark, bar.Text, bar.BorderShield,
+    }
 
     if bar.SetIsHighlightedCastTarget then
         hooksecurefunc(bar, "SetIsHighlightedCastTarget", function(self, isTarget)

@@ -4,4 +4,5 @@
 ## Version: 0.1
 ## SavedVariables: ArenaPetCastsDB
 
+ArenaPetCasts.xml
 ArenaPetCasts.lua
