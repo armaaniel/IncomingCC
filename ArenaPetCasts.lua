@@ -70,6 +70,7 @@ local function CreateBar(index)
     end
 
     bar:SetStatusBarTexture(BAR_TEXTURE)
+    bar:Hide()
 
     -- Our own flat background behind the fill.
     local bg = bar:CreateTexture(nil, "BACKGROUND")
@@ -220,13 +221,17 @@ local function RefreshUnits()
         end
 
         bar:SetUnit(wanted, false, true)
+
+        -- Always hide on rebind. A bound bar with no cast in progress would
+        -- otherwise sit on screen blank, because the mixin only hides a bar
+        -- when it sees a cast end - and there was never a cast to end.
+        bar:Hide()
+
         if wanted then
             if bar.SetHighlightWhenCastTarget then
                 bar:SetHighlightWhenCastTarget(db.onlyAtMe)
             end
             active[#active + 1] = bar
-        else
-            bar:Hide()
         end
     end
 
@@ -499,6 +504,23 @@ SlashCmdList.ARENAPETCASTS = function(msg)
 
     elseif msg == "color" or msg == "colour" then
         OpenColorPicker()
+
+    elseif msg:match("^testunit") then
+        local unit = msg:match("^testunit%s+(%S+)")
+        if not unit then
+            Print("usage: /apc testunit target   (or focus, mouseover, pet)")
+            Print("binds the first bar to that unit so you can test anywhere")
+            return
+        end
+        previewing = false
+        local bar = bars[1]
+        bar:SetUnit(unit, false, true)
+        if bar.SetHighlightWhenCastTarget then
+            bar:SetHighlightWhenCastTarget(db.onlyAtMe)
+        end
+        bar:Hide()
+        PositionBars({ bar })
+        Print("bar 1 bound to " .. unit .. " - cast at something, or /apc lock to undo")
 
     elseif msg == "status" then
         Print("bars bound:")
