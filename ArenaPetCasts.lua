@@ -12,26 +12,34 @@ local ADDON_NAME = ...
 
 local UNITS = { "arenapet1", "arenapet2", "arenapet3" }
 
-local WIDTH, HEIGHT, GAP = 220, 22, 4
-local COLOR     = { 1.00, 0.70, 0.00 }
-local CC_COLOR  = { 0.90, 0.20, 0.20 }
-local TEXTURE   = "Interface\\TargetingFrame\\UI-StatusBar"
+local TEXTURE = "Interface\\TargetingFrame\\UI-StatusBar"
 
--- Cast timestamps are secret, so real progress is unavailable. The bar fills
--- against this assumed duration instead. The elapsed counter beside it is
--- exact - it comes from GetTime(), which is not secret - so trust the number
--- over the bar when they disagree.
-local ASSUMED_CAST = 1.5
+local defaults = {
+    width       = 220,
+    height      = 22,
+    gap         = 4,
+    bgAlpha     = 0.5,
+    color       = { 1.00, 0.70, 0.00 },
+    ccColor     = { 0.90, 0.20, 0.20 },
 
--- Channels are the aftermath, not the warning. Seduction is cast first and
--- channels once it has landed - by then you are already crowd controlled and
--- the bar tells you nothing you can act on. A channel also runs far longer
--- than ASSUMED_CAST, so its bar would empty immediately and then sit at zero.
--- Set true if you want them anyway.
-local SHOW_CHANNELS = false
+    -- Real progress is unavailable, so the bar fills against this assumed
+    -- duration. The elapsed counter beside it is exact, from GetTime(), so
+    -- trust the number over the bar when they disagree.
+    assumedCast = 1.5,
+
+    -- Channels are the aftermath, not the warning: Seduction is cast first and
+    -- channels once it has landed, by which point you are already crowd
+    -- controlled. A channel also runs far longer than assumedCast, so its bar
+    -- would empty immediately and sit at zero.
+    showChannels = false,
+
+    onlyAtMe    = true,
+    locked      = true,
+}
 
 local bars, visible, classCache = {}, {}, {}
-local container, db
+local container, db, settingsCategory
+local ApplyLayout, ApplyStyle, OpenColorPicker, Restack
 
 --------------------------------------------------------------------------------
 -- Owner class
@@ -72,19 +80,19 @@ end
 
 local function CreateBar()
     local bar = CreateFrame("StatusBar", nil, container)
-    bar:SetSize(WIDTH, HEIGHT)
     bar:SetStatusBarTexture(TEXTURE)
-    bar:SetStatusBarColor(COLOR[1], COLOR[2], COLOR[3])
+    bar:SetStatusBarColor(db.color[1], db.color[2], db.color[3])
     bar:SetMinMaxValues(0, 1)
     bar:SetValue(1)
     bar:Hide()
 
     local bg = bar:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
-    bg:SetColorTexture(0, 0, 0, 0.5)
+    bg:SetColorTexture(0, 0, 0, 1)
+    bar.bg = bg
 
     local icon = bar:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(HEIGHT, HEIGHT)
+    icon:SetSize(db.height, db.height)
     icon:SetPoint("RIGHT", bar, "LEFT", -4, 0)
     icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
     bar.icon = icon
@@ -106,13 +114,35 @@ local function CreateBar()
     return bar
 end
 
+function ApplyLayout()
+    container:SetWidth(db.width)
+    for _, bar in ipairs(bars) do
+        bar:SetSize(db.width, db.height)
+        bar.icon:SetSize(db.height, db.height)
+        bar.text:ClearAllPoints()
+        bar.text:SetPoint("LEFT", bar, "LEFT", 5, 0)
+        bar.text:SetPoint("RIGHT", bar, "RIGHT", -42, 0)
+    end
+    Restack()
+end
+
+function ApplyStyle()
+    for _, bar in ipairs(bars) do
+        bar:SetStatusBarColor(db.color[1], db.color[2], db.color[3])
+        bar.bg:SetAlpha(db.bgAlpha)
+    end
+    if container and container.bg then
+        container.bg:SetColorTexture(db.color[1], db.color[2], db.color[3], 0.2)
+    end
+end
+
 -- Visible bars stack from the top with no gaps.
-local function Restack()
+function Restack()
     local n = 0
     for i, bar in ipairs(bars) do
         if visible[i] then
             bar:ClearAllPoints()
-            bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -n * (HEIGHT + GAP))
+            bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -n * (db.height + db.gap))
             n = n + 1
         end
     end
@@ -127,7 +157,7 @@ ticker:SetScript("OnUpdate", function()
     for i, bar in ipairs(bars) do
         if visible[i] and bar.startedAt then
             local elapsed = GetTime() - bar.startedAt
-            local progress = math.min(elapsed / ASSUMED_CAST, 1)
+            local progress = math.min(elapsed / db.assumedCast, 1)
             -- Channels drain rather than fill. Seduction is a channel, so this
             -- covers the spell the addon mostly exists for.
             bar:SetValue(bar.channeling and (1 - progress) or progress)
@@ -144,7 +174,7 @@ local function ShowCast(index, unit)
     local channeling = false
     local name, _, texture, _, _, _, _, _, spellID = UnitCastingInfo(unit)
     if not name then
-        if not SHOW_CHANNELS then return end
+        if not db.showChannels then return end
         channeling = true
         name, _, texture, _, _, _, _, spellID = UnitChannelInfo(unit)
     end
@@ -162,18 +192,18 @@ local function ShowCast(index, unit)
         local ok, isCC = pcall(C_Spell.IsSpellCrowdControl, spellID)
         if ok then
             coloured = pcall(tex.SetVertexColorFromBoolean, tex, isCC,
-                CreateColor(CC_COLOR[1], CC_COLOR[2], CC_COLOR[3]),
-                CreateColor(COLOR[1], COLOR[2], COLOR[3]))
+                CreateColor(db.ccColor[1], db.ccColor[2], db.ccColor[3]),
+                CreateColor(db.color[1], db.color[2], db.color[3]))
         end
     end
     if not coloured then
-        bar:SetStatusBarColor(COLOR[1], COLOR[2], COLOR[3])
+        bar:SetStatusBarColor(db.color[1], db.color[2], db.color[3])
     end
 
     -- Alpha carries "is it aimed at me". Two conditions, two properties, so
     -- they never have to be combined in Lua - which isn't possible anyway.
     local dimmed = false
-    if PlayerIsSpellTarget then
+    if db.onlyAtMe and PlayerIsSpellTarget then
         local ok, isTarget = pcall(PlayerIsSpellTarget, unit)
         if ok then
             dimmed = true
@@ -213,6 +243,84 @@ end
 
 local function HideAll()
     for i = 1, #bars do HideCast(i) end
+end
+
+--------------------------------------------------------------------------------
+-- Colour picker
+--------------------------------------------------------------------------------
+
+function OpenColorPicker(key)
+    local c = db[key]
+    local function changed()
+        local r, g, b = ColorPickerFrame:GetColorRGB()
+        db[key] = { r, g, b }
+        ApplyStyle()
+    end
+    local function cancelled()
+        local r, g, b = ColorPickerFrame:GetPreviousValues()
+        db[key] = { r, g, b }
+        ApplyStyle()
+    end
+    ColorPickerFrame:SetupColorPickerAndShow({
+        swatchFunc = changed, cancelFunc = cancelled,
+        hasOpacity = false, r = c[1], g = c[2], b = c[3],
+    })
+end
+
+--------------------------------------------------------------------------------
+-- Settings panel
+--------------------------------------------------------------------------------
+
+local function Refresh()
+    ApplyLayout()
+    ApplyStyle()
+end
+
+local function AddSlider(cat, key, name, tip, lo, hi, step)
+    local setting = Settings.RegisterAddOnSetting(
+        cat, ADDON_NAME .. "_" .. key, key, db, "number", name, defaults[key])
+    local opts = Settings.CreateSliderOptions(lo, hi, step)
+    opts:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
+    Settings.CreateSlider(cat, setting, opts, tip)
+    setting:SetValueChangedCallback(Refresh)
+end
+
+local function AddCheck(cat, key, name, tip, fn)
+    local setting = Settings.RegisterAddOnSetting(
+        cat, ADDON_NAME .. "_" .. key, key, db, "boolean", name, defaults[key])
+    Settings.CreateCheckbox(cat, setting, tip)
+    setting:SetValueChangedCallback(fn or Refresh)
+end
+
+local function BuildSettings()
+    local cat, layout = Settings.RegisterVerticalLayoutCategory("ArenaPetCasts")
+    settingsCategory = cat
+
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Size"))
+    AddSlider(cat, "width",   "Bar Width",   "Width of each bar.",                    120, 400, 5)
+    AddSlider(cat, "height",  "Bar Height",  "Height of each bar.",                   14,  50,  1)
+    AddSlider(cat, "gap",     "Bar Spacing", "Gap between stacked bars.",             0,   20,  1)
+    AddSlider(cat, "bgAlpha", "Background",  "Opacity behind the fill.",              0,   1,   0.05)
+
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Timing"))
+    AddSlider(cat, "assumedCast", "Assumed Cast Time",
+        "Cast time the bar fills against. Real progress is unreadable, so this is an estimate - the number beside the bar is exact.",
+        0.5, 4, 0.1)
+
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Behaviour"))
+    AddCheck(cat, "onlyAtMe", "Only Casts At Me",
+        "Hide bars for pet casts aimed at someone else.")
+    AddCheck(cat, "showChannels", "Show Channels",
+        "Show bars while a pet is channelling. Off by default: the channel begins after the crowd control has already landed.")
+
+    if CreateSettingsButtonInitializer then
+        layout:AddInitializer(CreateSettingsButtonInitializer("Bar Colour", "Choose...",
+            function() OpenColorPicker("color") end, "Fill colour for ordinary casts.", true))
+        layout:AddInitializer(CreateSettingsButtonInitializer("Crowd Control Colour", "Choose...",
+            function() OpenColorPicker("ccColor") end, "Fill colour when the cast is crowd control.", true))
+    end
+
+    Settings.RegisterAddOnCategory(cat)
 end
 
 --------------------------------------------------------------------------------
@@ -264,11 +372,14 @@ f:SetScript("OnEvent", function(self, event, arg1)
         if arg1 ~= ADDON_NAME then return end
         self:UnregisterEvent("ADDON_LOADED")
 
-        ArenaPetCastsDB = ArenaPetCastsDB or { locked = true }
+        ArenaPetCastsDB = ArenaPetCastsDB or {}
         db = ArenaPetCastsDB
+        for k, v in pairs(defaults) do
+            if db[k] == nil then db[k] = v end
+        end
 
         container = CreateFrame("Frame", "ArenaPetCastsAnchor", UIParent)
-        container:SetSize(WIDTH, #UNITS * (HEIGHT + GAP))
+        container:SetSize(db.width, #UNITS * (db.height + db.gap))
         container:SetFrameStrata("HIGH")
         container:SetMovable(true)
         container:RegisterForDrag("LeftButton")
@@ -281,7 +392,7 @@ f:SetScript("OnEvent", function(self, event, arg1)
 
         local bg = container:CreateTexture(nil, "BACKGROUND")
         bg:SetAllPoints()
-        bg:SetColorTexture(COLOR[1], COLOR[2], COLOR[3], 0.2)
+        bg:SetColorTexture(db.color[1], db.color[2], db.color[3], 0.2)
         bg:Hide()
         container.bg = bg
 
@@ -295,6 +406,9 @@ f:SetScript("OnEvent", function(self, event, arg1)
             for event in pairs(STOP)  do self:RegisterUnitEvent(event, unit) end
         end
 
+        ApplyLayout()
+        ApplyStyle()
+        BuildSettings()
         SetLocked(db.locked ~= false)
         return
     end
@@ -361,6 +475,6 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         container:SetPoint("CENTER", UIParent, "CENTER", 0, 150)
         print("|cffffb300ArenaPetCasts|r position reset")
     else
-        print("|cffffb300ArenaPetCasts|r  /apc unlock  |  /apc lock  |  /apc reset  |  /apc testunit target")
+        if settingsCategory then Settings.OpenToCategory(settingsCategory:GetID()) end
     end
 end
