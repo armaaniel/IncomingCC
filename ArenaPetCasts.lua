@@ -18,6 +18,7 @@ local defaults = {
     showCaster = true,
     showSpark  = true,
     onlyAtMe   = true,
+    warlockOnly = true,
     locked     = true,
     point      = { "CENTER", "CENTER", 0, 150 },
 }
@@ -68,37 +69,30 @@ local function SetBarVisiblePlain(bar, visible)
 end
 
 -- Drives the bar's fill from a duration object so the bar animates itself.
--- No timestamps are ever read into Lua. The exact CreateDuration signature is
--- not something I could verify, so both plausible shapes are attempted and the
--- working one is remembered.
-local durationStyle
-
-local function ApplyTimer(bar, startMS, endMS)
+-- CreateDuration takes no arguments and yields a zero-length duration; the
+-- span has to be set afterwards. SetTimeSpan is documented as refusing secret
+-- values from tainted callers, and cast timestamps are secret, so this may
+-- simply fail - in which case the caller falls back to a static bar.
+local function ApplyTimer(bar, startMS, endMS, channeling)
     if not (C_DurationUtil and C_DurationUtil.CreateDuration and bar.SetTimerDuration) then
         return false
     end
+    if not (startMS and endMS) then return false end
 
-    local function attempt(style)
-        local ok, duration
-        if style == "range" then
-            ok, duration = Try(C_DurationUtil.CreateDuration, startMS, endMS)
-        else
-            ok, duration = Try(C_DurationUtil.CreateDuration, endMS)
-        end
-        if not ok or not duration then return false end
-        return (Try(bar.SetTimerDuration, bar, duration))
+    local ok, duration = Try(C_DurationUtil.CreateDuration)
+    if not ok or not duration then return false end
+
+    if not (Try(duration.SetTimeSpan, duration, startMS, endMS)) then
+        return false
     end
 
-    if durationStyle then return attempt(durationStyle) end
-
-    if attempt("range") then
-        durationStyle = "range"
-        return true
-    elseif attempt("single") then
-        durationStyle = "single"
-        return true
+    -- Channels drain rather than fill, which the direction parameter handles.
+    local direction
+    if channeling and Enum and Enum.StatusBarTimerDirection then
+        direction = Enum.StatusBarTimerDirection.RemainingTime
     end
-    return false
+
+    return (Try(bar.SetTimerDuration, bar, duration, nil, direction))
 end
 
 --------------------------------------------------------------------------------
@@ -171,13 +165,43 @@ end
 -- Cast display
 --------------------------------------------------------------------------------
 
+-- A pet's owner is the arena unit with the matching index. issecretvalue
+-- returns an ordinary boolean, so it is safe to branch on and lets us tell
+-- whether the class came back readable before trusting it.
+local function IsWarlockPet(index)
+    local owner = "arena" .. index
+
+    local class = UnitClassBase and UnitClassBase(owner)
+    if class and not issecretvalue(class) then
+        return class == "WARLOCK"
+    end
+
+    -- Falls back to the arena spec API, which is populated during prep.
+    if GetArenaOpponentSpec and GetSpecializationInfoByID then
+        local specID = GetArenaOpponentSpec(index)
+        if specID and specID > 0 then
+            local _, _, _, _, _, classFile = GetSpecializationInfoByID(specID)
+            return classFile == "WARLOCK"
+        end
+    end
+
+    return false
+end
+
 local function ShowCast(unit)
     local index = unitToBar[unit]
     if not index then return end
     local bar = bars[index]
 
+    if db.warlockOnly and not IsWarlockPet(index) then
+        bar:Hide()
+        return
+    end
+
+    local channeling = false
     local name, _, texture, startMS, endMS = UnitCastingInfo(unit)
     if not name then
+        channeling = true
         name, _, texture, startMS, endMS = UnitChannelInfo(unit)
     end
 
@@ -204,8 +228,16 @@ local function ShowCast(unit)
         bar.spellText:SetText(label)
     end
 
-    if not ApplyTimer(bar, startMS, endMS) then
-        bar:SetValue(1)  -- no animation available; at least show the bar
+    -- Colour is re-applied per cast: SetTimerDuration and the FromBoolean
+    -- setters both touch the fill texture, and either could disturb it.
+    local c = db.barColor
+    bar:SetStatusBarColor(c[1], c[2], c[3])
+
+    if not ApplyTimer(bar, startMS, endMS, channeling) then
+        -- No animation available, but a solid bar for the cast's lifetime is
+        -- still useful: the stop events hide it at the right moment.
+        bar:SetMinMaxValues(0, 1)
+        bar:SetValue(1)
     end
 
     bar:Show()
@@ -344,7 +376,8 @@ local function BuildSettings()
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Appearance"))
     AddCheckbox(category, "showSpark",  "Show Spark",       "Show the moving spark on the leading edge of the fill.", RefreshVisuals)
     AddCheckbox(category, "showCaster", "Show Pet Name",    "Label bars with the pet's name instead of the spell.",   RefreshVisuals)
-    AddCheckbox(category, "onlyAtMe",   "Only Casts At Me", "Hide bars for pet casts aimed at someone else.",         RefreshVisuals)
+    AddCheckbox(category, "onlyAtMe",    "Only Casts At Me", "Hide bars for pet casts aimed at someone else.",      RefreshVisuals)
+    AddCheckbox(category, "warlockOnly", "Warlock Pets Only", "Ignore hunter, mage, death knight and other pets.",   RefreshVisuals)
 
     if CreateSettingsButtonInitializer then
         layout:AddInitializer(CreateSettingsButtonInitializer(
