@@ -9,12 +9,6 @@ local NUM_BARS = #UNITS
 
 local BAR_TEXTURE = "Interface\\TargetingFrame\\UI-StatusBar"
 
--- Classes that can bring a pet into arena. Only warlock is on by default.
-local PET_CLASSES = {
-    "WARLOCK", "HUNTER", "MAGE", "DEATHKNIGHT",
-    "SHAMAN", "PRIEST", "DRUID", "MONK",
-}
-
 local defaults = {
     barWidth    = 220,
     barHeight   = 20,
@@ -22,7 +16,6 @@ local defaults = {
     barColor    = { 1.0, 0.7, 0.0 },
     bgAlpha     = 0,
     onlyAtMe    = true,
-    petClasses  = { WARLOCK = true },
     showIcon    = true,
     locked      = true,
     point       = { "CENTER", "CENTER", 0, 150 },
@@ -62,6 +55,23 @@ local function CreateBar(index)
         "CastingBarFrameAnimsTemplate"
     )
     Mixin(bar, CastingBarMixin)
+
+    -- Three mixin methods iterate the global CastingBarTypeInfo, which Midnight
+    -- protects from tainted access - so they throw the moment a cast starts.
+    -- They only toggle spark effect textures we do not have, so replacing them
+    -- costs nothing and keeps the rest of the mixin intact. Mixin copies
+    -- functions onto the frame, so these instance overrides win.
+    bar.ShowSpark = function(self)
+        if self.Spark then self.Spark:Show() end
+    end
+    bar.HideSpark = function(self)
+        if self.Spark then self.Spark:Hide() end
+    end
+    bar.StopFinishAnims = function(self)
+        if self.HoldFadeOutAnim then self.HoldFadeOutAnim:Stop() end
+        if self.FadeOutAnim then self.FadeOutAnim:Stop() end
+        if self.Flash then self.Flash:SetAlpha(0) end
+    end
 
     bar:SetStatusBarTexture(BAR_TEXTURE)
 
@@ -264,10 +274,10 @@ end
 
 local function ShouldShowPet(index)
     local class = ResolveClass(index)
-    -- Unknown class shows the bar. An unwanted bar beats an addon that
-    -- silently displays nothing, and the class usually resolves a moment later.
+    -- Unknown class shows the bar rather than hiding it; the class usually
+    -- resolves a moment later, and silently showing nothing is the worse bug.
     if not class then return true end
-    return db.petClasses[class] == true
+    return class == "WARLOCK"
 end
 
 -- Binding a bar to nil unregisters its events, which is how a non-warlock pet
@@ -441,16 +451,6 @@ local function BuildSettings()
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Filtering"))
     AddCheckbox(category, "onlyAtMe",    "Only Casts At Me",  "Hide bars for pet casts aimed at someone else.",   RefreshVisuals)
 
-    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Pet Classes"))
-    for _, class in ipairs(PET_CLASSES) do
-        local label = class:sub(1, 1) .. class:sub(2):lower()
-        local setting = Settings.RegisterAddOnSetting(
-            category, ADDON_NAME .. "_pet_" .. class, class, db.petClasses,
-            "boolean", label, defaults.petClasses[class] == true
-        )
-        Settings.CreateCheckbox(category, setting, "Show cast bars for " .. label .. " pets.")
-        setting:SetValueChangedCallback(RefreshVisuals)
-    end
 
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Position"))
     AddCheckbox(category, "locked", "Lock Position", "Prevent the bars from being dragged.", ApplyLock)
@@ -477,12 +477,6 @@ local function Initialize()
     db = ArenaPetCastsDB
     for k, v in pairs(defaults) do
         if db[k] == nil then db[k] = v end
-    end
-    db.petClasses = db.petClasses or {}
-    for _, class in ipairs(PET_CLASSES) do
-        if db.petClasses[class] == nil then
-            db.petClasses[class] = defaults.petClasses[class] == true
-        end
     end
 
     container = CreateFrame("Frame", "ArenaPetCastsAnchor", UIParent)
@@ -587,6 +581,48 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         slots[1] = bar
         PositionBars()
         Print("bar 1 bound to " .. unit .. " - cast at something, or /apc lock to undo")
+
+    elseif msg == "check" then
+        Print("---- self check ----")
+        Print(string.format("globals: CastingBarMixin=%s Mixin=%s hooksecurefunc=%s",
+            tostring(CastingBarMixin ~= nil), tostring(Mixin ~= nil), tostring(hooksecurefunc ~= nil)))
+        Print(string.format("apis: PlayerIsSpellTarget=%s issecretvalue=%s IsSpellCrowdControl=%s",
+            tostring(PlayerIsSpellTarget ~= nil), tostring(issecretvalue ~= nil),
+            tostring(C_Spell and C_Spell.IsSpellCrowdControl ~= nil)))
+
+        Print(string.format("bars created: %d of %d", #bars, NUM_BARS))
+        local b = bars[1]
+        if not b then
+            Print("BAR 1 MISSING - CreateFrame failed, template probably absent")
+        else
+            Print(string.format("bar1 methods: SetUnit=%s OnLoad=%s OnEvent=%s SetHighlightWhenCastTarget=%s",
+                tostring(b.SetUnit ~= nil), tostring(b.OnLoad ~= nil),
+                tostring(b.OnEvent ~= nil), tostring(b.SetHighlightWhenCastTarget ~= nil)))
+            local tex = b:GetStatusBarTexture()
+            Print(string.format("bar1 state: unit=%s shown=%s alpha=%.2f texAlpha=%.2f size=%dx%d",
+                tostring(b.unit), tostring(b:IsShown()), b:GetAlpha(),
+                tex and tex:GetAlpha() or -1,
+                math.floor(b:GetWidth()), math.floor(b:GetHeight())))
+        end
+
+        local p1, _, p2, x, y = container:GetPoint()
+        Print(string.format("anchor: shown=%s %s/%s x=%d y=%d size=%dx%d strata=%s",
+            tostring(container:IsShown()), tostring(p1), tostring(p2),
+            math.floor(x or 0), math.floor(y or 0),
+            math.floor(container:GetWidth()), math.floor(container:GetHeight()),
+            tostring(container:GetFrameStrata())))
+
+        Print(string.format("settings: onlyAtMe=%s bgAlpha=%s locked=%s previewing=%s",
+            tostring(db.onlyAtMe), tostring(db.bgAlpha), tostring(db.locked), tostring(previewing)))
+
+
+        local inInst, instType = IsInInstance()
+        Print(string.format("zone: inInstance=%s type=%s specs=%s",
+            tostring(inInst), tostring(instType),
+            tostring(GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs())))
+
+        Print(string.format("target casting: %s", tostring(UnitCastingInfo("target") ~= nil)))
+        Print("---- end ----")
 
     elseif msg == "status" then
         Print("bars bound:")
