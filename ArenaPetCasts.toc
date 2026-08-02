@@ -1,8 +1,7 @@
 ## Interface: 120007
 ## Title: ArenaPetCasts
-## Notes: Cast bars for enemy arena pets casting at you
-## Version: 0.1
+## Notes: Bars for enemy warlock pets casting at you in arena
+## Version: 1.0
 ## SavedVariables: ArenaPetCastsDB
 
-ArenaPetCasts.xml
 ArenaPetCasts.lua
