@@ -7,28 +7,34 @@ local ADDON_NAME = ...
 local UNITS = { "arenapet1", "arenapet2", "arenapet3" }
 local NUM_BARS = #UNITS
 
-local BAR_TEXTURE   = "Interface\\TargetingFrame\\UI-StatusBar"
-local SPARK_TEXTURE = "Interface\\CastingBar\\UI-CastingBar-Spark"
+local BAR_TEXTURE = "Interface\\TargetingFrame\\UI-StatusBar"
+
+-- Blizzard's template ships a lot of art we don't want. These are hidden if
+-- present; the list is defensive because region names change between builds.
+local ART_REGIONS = {
+    "Background", "BaseGlow", "Border", "BorderMask", "ChannelShadow",
+    "CraftGlow", "CraftingMask", "DropShadow", "EnergyGlow", "EnergyMask",
+    "Shine", "StandardGlow", "TextBorder", "WispGlow", "WispMask",
+}
 
 local defaults = {
-    barWidth   = 220,
-    barHeight  = 20,
-    barGap     = 4,
-    barColor   = { 1.0, 0.7, 0.0 },
-    showCaster = true,
-    showSpark  = true,
-    onlyAtMe   = true,
+    barWidth    = 220,
+    barHeight   = 20,
+    barGap      = 4,
+    barColor    = { 1.0, 0.7, 0.0 },
+    bgAlpha     = 0,
+    onlyAtMe    = true,
     warlockOnly = true,
-    locked     = true,
-    point      = { "CENTER", "CENTER", 0, 150 },
+    showIcon    = true,
+    locked      = true,
+    point       = { "CENTER", "CENTER", 0, 150 },
 }
 
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
 
-local bars = {}            -- [index] = StatusBar, one per unit, fixed position
-local unitToBar = {}       -- [unitToken] = index
+local bars = {}
 local container
 local settingsCategory
 local previewing = false
@@ -37,101 +43,53 @@ local db
 local ApplyLayout, ApplyStyle, SetPreview
 
 --------------------------------------------------------------------------------
--- Secret-value helpers
---------------------------------------------------------------------------------
-
--- Midnight forbids arithmetic, comparison and boolean tests on secret values.
--- Everything in this section hands secrets straight to Blizzard APIs that are
--- allowed to open them, and never inspects a value in Lua.
-
-local function Try(fn, ...)
-    if not fn then return false end
-    local ok, result = pcall(fn, ...)
-    return ok, result
-end
-
--- Sets the visibility of every region on a bar from a secret boolean. Frames
--- have no confirmed SetAlphaFromBoolean, but textures and font strings do, so
--- the bar is dimmed region by region rather than hidden outright.
-local function SetBarVisibleFromSecret(bar, secretBool)
-    for _, region in ipairs(bar.regions) do
-        if region.SetAlphaFromBoolean then
-            pcall(region.SetAlphaFromBoolean, region, secretBool, 1, 0)
-        end
-    end
-end
-
-local function SetBarVisiblePlain(bar, visible)
-    local alpha = visible and 1 or 0
-    for _, region in ipairs(bar.regions) do
-        region:SetAlpha(alpha)
-    end
-end
-
--- Drives the bar's fill from a duration object so the bar animates itself.
--- CreateDuration takes no arguments and yields a zero-length duration; the
--- span has to be set afterwards. SetTimeSpan is documented as refusing secret
--- values from tainted callers, and cast timestamps are secret, so this may
--- simply fail - in which case the caller falls back to a static bar.
-local function ApplyTimer(bar, startMS, endMS, channeling)
-    if not (C_DurationUtil and C_DurationUtil.CreateDuration and bar.SetTimerDuration) then
-        return false
-    end
-    if not (startMS and endMS) then return false end
-
-    local ok, duration = Try(C_DurationUtil.CreateDuration)
-    if not ok or not duration then return false end
-
-    if not (Try(duration.SetTimeSpan, duration, startMS, endMS)) then
-        return false
-    end
-
-    -- Channels drain rather than fill, which the direction parameter handles.
-    local direction
-    if channeling and Enum and Enum.StatusBarTimerDirection then
-        direction = Enum.StatusBarTimerDirection.RemainingTime
-    end
-
-    return (Try(bar.SetTimerDuration, bar, duration, nil, direction))
-end
-
---------------------------------------------------------------------------------
 -- Bars
 --------------------------------------------------------------------------------
 
+-- Blizzard's CastingBarMixin does all the work: it registers its own spellcast
+-- events, drives the fill and the spark, handles channels and interrupts, and
+-- resolves PlayerIsSpellTarget internally. It runs untainted, so it is allowed
+-- to read secret values that addon code cannot touch. We only restyle it.
 local function CreateBar(index)
-    local bar = CreateFrame("StatusBar", nil, container)
-    bar:SetStatusBarTexture(BAR_TEXTURE)
-    bar:SetMinMaxValues(0, 1)
-    bar:SetValue(0)
-    bar:Hide()
+    local bar = CreateFrame(
+        "StatusBar",
+        "ArenaPetCastBar" .. index,
+        container,
+        "CastingBarFrameTemplate"
+    )
 
+    for _, key in ipairs(ART_REGIONS) do
+        local region = bar[key]
+        if region and region.Hide then region:Hide() end
+    end
+
+    bar:SetStatusBarTexture(BAR_TEXTURE)
+
+    -- Our own flat background behind the fill.
     local bg = bar:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
-    bg:SetColorTexture(0, 0, 0, 0.5)
-    bar.bg = bg
+    bg:SetColorTexture(0, 0, 0, 1)
+    bar.ourBG = bg
 
-    local icon = bar:CreateTexture(nil, "ARTWORK")
-    icon:SetPoint("RIGHT", bar, "LEFT", -5, 0)
-    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-    bar.icon = icon
+    -- Regions dimmed together when the cast is not aimed at us. The background
+    -- is deliberately excluded so its own opacity setting still applies.
+    bar.dimRegions = { bar:GetStatusBarTexture() }
+    for _, key in ipairs({ "Icon", "Spark", "Text", "CastTimeText", "BorderShield" }) do
+        if bar[key] then bar.dimRegions[#bar.dimRegions + 1] = bar[key] end
+    end
 
-    -- The spark is anchored to the fill texture's right edge rather than
-    -- positioned by hand. The bar moves that edge internally, so the spark
-    -- tracks the fill without any Lua ever reading the progress value.
-    local spark = bar:CreateTexture(nil, "OVERLAY")
-    spark:SetTexture(SPARK_TEXTURE)
-    spark:SetBlendMode("ADD")
-    spark:SetPoint("CENTER", bar:GetStatusBarTexture(), "RIGHT", 0, 0)
-    bar.spark = spark
-
-    local spellText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    spellText:SetJustifyH("CENTER")
-    spellText:SetWordWrap(false)
-    bar.spellText = spellText
-
-    -- Regions whose alpha is driven from the secret target check.
-    bar.regions = { bar:GetStatusBarTexture(), bg, icon, spark, spellText }
+    -- Blizzard sets this from PlayerIsSpellTarget on its own schedule. Hooking
+    -- it lets us mirror that secret boolean into alpha without ever reading it.
+    if bar.SetIsHighlightedCastTarget then
+        hooksecurefunc(bar, "SetIsHighlightedCastTarget", function(self, isTarget)
+            if previewing or not db.onlyAtMe then return end
+            for _, region in ipairs(self.dimRegions) do
+                if region.SetAlphaFromBoolean then
+                    pcall(region.SetAlphaFromBoolean, region, isTarget, 1, 0)
+                end
+            end
+        end)
+    end
 
     return bar
 end
@@ -145,29 +103,44 @@ function ApplyLayout()
         bar:SetSize(w, h)
         bar:ClearAllPoints()
         bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -((i - 1) * (h + gap)))
-        bar.icon:SetSize(h, h)
-        bar.spark:SetSize(16, h + 10)
-        bar.spellText:ClearAllPoints()
-        bar.spellText:SetPoint("LEFT", bar, "LEFT", 6, 0)
-        bar.spellText:SetPoint("RIGHT", bar, "RIGHT", -6, 0)
+
+        if bar.Icon then
+            bar.Icon:SetSize(h, h)
+            bar.Icon:ClearAllPoints()
+            bar.Icon:SetPoint("RIGHT", bar, "LEFT", -4, 0)
+            bar.Icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+            bar.Icon:SetShown(db.showIcon)
+        end
+
+        if bar.Spark then
+            bar.Spark:SetHeight(h + 10)
+        end
     end
 end
 
 function ApplyStyle()
     local c = db.barColor
     for i = 1, NUM_BARS do
-        bars[i]:SetStatusBarColor(c[1], c[2], c[3])
-        bars[i].spark:SetShown(db.showSpark)
+        local bar = bars[i]
+        bar:SetStatusBarColor(c[1], c[2], c[3])
+        bar.ourBG:SetAlpha(db.bgAlpha)
+
+        -- With the filter off nothing dims the bar, so make sure a previous
+        -- dimming pass isn't left over.
+        if not db.onlyAtMe then
+            for _, region in ipairs(bar.dimRegions) do
+                region:SetAlpha(1)
+            end
+        end
     end
 end
 
 --------------------------------------------------------------------------------
--- Cast display
+-- Unit binding
 --------------------------------------------------------------------------------
 
--- A pet's owner is the arena unit with the matching index. issecretvalue
--- returns an ordinary boolean, so it is safe to branch on and lets us tell
--- whether the class came back readable before trusting it.
+-- issecretvalue returns an ordinary boolean, so it is safe to branch on and
+-- tells us whether the class came back readable before trusting it.
 local function IsWarlockPet(index)
     local owner = "arena" .. index
 
@@ -176,7 +149,6 @@ local function IsWarlockPet(index)
         return class == "WARLOCK"
     end
 
-    -- Falls back to the arena spec API, which is populated during prep.
     if GetArenaOpponentSpec and GetSpecializationInfoByID then
         local specID = GetArenaOpponentSpec(index)
         if specID and specID > 0 then
@@ -188,81 +160,26 @@ local function IsWarlockPet(index)
     return false
 end
 
-local function ShowCast(unit)
-    local index = unitToBar[unit]
-    if not index then return end
-    local bar = bars[index]
+-- Binding a bar to nil unregisters its events, which is how a non-warlock pet
+-- gets filtered out: the bar simply never has a unit to watch.
+local function RefreshUnits()
+    if previewing then return end
 
-    if db.warlockOnly and not IsWarlockPet(index) then
-        bar:Hide()
-        return
-    end
-
-    local channeling = false
-    local name, _, texture, startMS, endMS = UnitCastingInfo(unit)
-    if not name then
-        channeling = true
-        name, _, texture, startMS, endMS = UnitChannelInfo(unit)
-    end
-
-    -- Truthiness tests on non-boolean secrets are permitted, since nil-ness
-    -- itself is not secret. This tells us a cast exists without reading it.
-    if not name then
-        bar:Hide()
-        return
-    end
-
-    pcall(bar.icon.SetTexture, bar.icon, texture)
-
-    -- Spell names may be rejected as secret strings. The caster name is a
-    -- normal string, so it is set separately and survives either way.
-    local label = ""
-    if db.showCaster then
-        label = UnitName(unit) or unit
-    end
-    local okName = false
-    if not db.showCaster then
-        okName = pcall(bar.spellText.SetText, bar.spellText, name)
-    end
-    if not okName then
-        bar.spellText:SetText(label)
-    end
-
-    -- Colour is re-applied per cast: SetTimerDuration and the FromBoolean
-    -- setters both touch the fill texture, and either could disturb it.
-    local c = db.barColor
-    bar:SetStatusBarColor(c[1], c[2], c[3])
-
-    if not ApplyTimer(bar, startMS, endMS, channeling) then
-        -- No animation available, but a solid bar for the cast's lifetime is
-        -- still useful: the stop events hide it at the right moment.
-        bar:SetMinMaxValues(0, 1)
-        bar:SetValue(1)
-    end
-
-    bar:Show()
-
-    if db.onlyAtMe and PlayerIsSpellTarget then
-        local ok, targeted = pcall(PlayerIsSpellTarget, unit)
-        if ok then
-            SetBarVisibleFromSecret(bar, targeted)
-        else
-            SetBarVisiblePlain(bar, true)
-        end
-    else
-        SetBarVisiblePlain(bar, true)
-    end
-end
-
-local function HideCast(unit)
-    local index = unitToBar[unit]
-    if not index then return end
-    bars[index]:Hide()
-end
-
-local function HideAll()
     for i = 1, NUM_BARS do
-        bars[i]:Hide()
+        local bar = bars[i]
+        local wanted = UNITS[i]
+
+        if db.warlockOnly and not IsWarlockPet(i) then
+            wanted = nil
+        end
+
+        bar:SetUnit(wanted, false, true)
+        if wanted and bar.SetHighlightWhenCastTarget then
+            bar:SetHighlightWhenCastTarget(db.onlyAtMe)
+        end
+        if not wanted then
+            bar:Hide()
+        end
     end
 end
 
@@ -288,31 +205,45 @@ local function ApplyLock()
 end
 
 local PREVIEW = {
-    { label = "Felhunter",   texture = 136174, fill = 0.65 },
-    { label = "Sayaad",      texture = 136206, fill = 0.40 },
-    { label = "Voidwalker",  texture = 136221, fill = 0.15 },
+    { label = "Felhunter",  texture = 136174, fill = 0.65 },
+    { label = "Sayaad",     texture = 136206, fill = 0.40 },
+    { label = "Voidwalker", texture = 136221, fill = 0.15 },
 }
 
 function SetPreview(enabled)
     previewing = enabled
-    HideAll()
-    if not enabled then return end
 
     for i = 1, NUM_BARS do
-        local s = PREVIEW[i]
         local bar = bars[i]
-        bar.icon:SetTexture(s.texture)
-        bar.spellText:SetText(s.label)
-        bar:SetValue(s.fill)
-        SetBarVisiblePlain(bar, true)
-        bar:Show()
+
+        if enabled then
+            -- Unbind so Blizzard's event handling doesn't overwrite the sample.
+            bar:SetUnit(nil)
+            local s = PREVIEW[i]
+            if bar.Icon then bar.Icon:SetTexture(s.texture) end
+            if bar.Text then bar.Text:SetText(s.label) end
+            bar:SetMinMaxValues(0, 1)
+            bar:SetValue(s.fill)
+            for _, region in ipairs(bar.dimRegions) do
+                region:SetAlpha(1)
+            end
+            bar:Show()
+        else
+            bar:Hide()
+        end
     end
+
+    if not enabled then RefreshUnits() end
 end
 
 local function RefreshVisuals()
     ApplyLayout()
     ApplyStyle()
-    if previewing then SetPreview(true) end
+    if previewing then
+        SetPreview(true)
+    else
+        RefreshUnits()
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -369,15 +300,13 @@ local function BuildSettings()
     settingsCategory = category
 
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Size"))
-    AddSlider(category, "barWidth",  "Bar Width",   "Width of each cast bar.",            120, 400, 5)
-    AddSlider(category, "barHeight", "Bar Height",  "Height of each cast bar.",           14,  50,  1)
-    AddSlider(category, "barGap",    "Bar Spacing", "Vertical gap between stacked bars.", 0,   20,  1)
+    AddSlider(category, "barWidth",  "Bar Width",   "Width of each cast bar.",                  120, 400, 5)
+    AddSlider(category, "barHeight", "Bar Height",  "Height of each cast bar.",                 14,  50,  1)
+    AddSlider(category, "barGap",    "Bar Spacing", "Vertical gap between stacked bars.",       0,   20,  1)
+    AddSlider(category, "bgAlpha",   "Background",  "Opacity of the unfilled part of the bar.", 0,   1,   0.05)
 
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Appearance"))
-    AddCheckbox(category, "showSpark",  "Show Spark",       "Show the moving spark on the leading edge of the fill.", RefreshVisuals)
-    AddCheckbox(category, "showCaster", "Show Pet Name",    "Label bars with the pet's name instead of the spell.",   RefreshVisuals)
-    AddCheckbox(category, "onlyAtMe",    "Only Casts At Me", "Hide bars for pet casts aimed at someone else.",      RefreshVisuals)
-    AddCheckbox(category, "warlockOnly", "Warlock Pets Only", "Ignore hunter, mage, death knight and other pets.",   RefreshVisuals)
+    AddCheckbox(category, "showIcon", "Show Spell Icon", "Show the spell icon beside the bar.", RefreshVisuals)
 
     if CreateSettingsButtonInitializer then
         layout:AddInitializer(CreateSettingsButtonInitializer(
@@ -385,6 +314,10 @@ local function BuildSettings()
             "Pick the fill colour for the cast bars.", true
         ))
     end
+
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Filtering"))
+    AddCheckbox(category, "onlyAtMe",    "Only Casts At Me",  "Hide bars for pet casts aimed at someone else.",   RefreshVisuals)
+    AddCheckbox(category, "warlockOnly", "Warlock Pets Only", "Ignore hunter, mage, death knight and other pets.", RefreshVisuals)
 
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Position"))
     AddCheckbox(category, "locked", "Lock Position", "Prevent the bars from being dragged.", ApplyLock)
@@ -405,34 +338,6 @@ end
 --------------------------------------------------------------------------------
 -- Events
 --------------------------------------------------------------------------------
-
-local START_EVENTS = {
-    UNIT_SPELLCAST_START      = true,
-    UNIT_SPELLCAST_CHANNEL_START = true,
-}
-
-local STOP_EVENTS = {
-    UNIT_SPELLCAST_STOP           = true,
-    UNIT_SPELLCAST_SUCCEEDED      = true,
-    UNIT_SPELLCAST_FAILED         = true,
-    UNIT_SPELLCAST_INTERRUPTED    = true,
-    UNIT_SPELLCAST_CHANNEL_STOP   = true,
-}
-
-local function RegisterUnitEvents(frame)
-    -- Unit tokens are never secret, so cast start and stop can be driven
-    -- entirely by events. No polling and no timestamp arithmetic.
-    for event in pairs(START_EVENTS) do
-        for _, unit in ipairs(UNITS) do
-            frame:RegisterUnitEvent(event, unit)
-        end
-    end
-    for event in pairs(STOP_EVENTS) do
-        for _, unit in ipairs(UNITS) do
-            frame:RegisterUnitEvent(event, unit)
-        end
-    end
-end
 
 local function Initialize()
     ArenaPetCastsDB = ArenaPetCastsDB or {}
@@ -465,7 +370,6 @@ local function Initialize()
 
     for i = 1, NUM_BARS do
         bars[i] = CreateBar(i)
-        unitToBar[UNITS[i]] = i
     end
 
     ApplyLayout()
@@ -473,31 +377,26 @@ local function Initialize()
     ApplyPosition()
     ApplyLock()
     BuildSettings()
+    RefreshUnits()
 end
 
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("ARENA_OPPONENT_UPDATE")
-events:SetScript("OnEvent", function(self, event, unit)
+events:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
+events:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
-        if unit == ADDON_NAME then
+        if arg1 == ADDON_NAME then
             Initialize()
-            RegisterUnitEvents(self)
             self:UnregisterEvent("ADDON_LOADED")
         end
         return
     end
 
-    if previewing then return end
-
-    if START_EVENTS[event] then
-        ShowCast(unit)
-    elseif STOP_EVENTS[event] then
-        HideCast(unit)
-    elseif event == "PLAYER_ENTERING_WORLD" or event == "ARENA_OPPONENT_UPDATE" then
-        HideAll()
-    end
+    -- Opponent classes aren't known until prep, so rebind whenever the roster
+    -- or the zone changes.
+    RefreshUnits()
 end)
 
 --------------------------------------------------------------------------------
