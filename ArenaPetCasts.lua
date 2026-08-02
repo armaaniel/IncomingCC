@@ -56,21 +56,31 @@ local function CreateBar(index)
     )
     Mixin(bar, CastingBarMixin)
 
-    -- Three mixin methods iterate the global CastingBarTypeInfo, which Midnight
-    -- protects from tainted access - so they throw the moment a cast starts.
-    -- They only toggle spark effect textures we do not have, so replacing them
-    -- costs nothing and keeps the rest of the mixin intact. Mixin copies
-    -- functions onto the frame, so these instance overrides win.
+    -- CastingBarType's values are secretwrap()'d, so CastingBarTypeInfo is
+    -- keyed by secrets. Tainted code cannot index it, iterate it, or compare
+    -- anything against the enum. Six mixin methods do one of those; all of
+    -- them only pick cosmetic atlas art and effect textures we do not use, so
+    -- replacing them costs nothing. Mixin copies functions onto the frame, so
+    -- these instance overrides take precedence over the originals.
+    local FLAT_TYPE_INFO = { filling = "", full = "", glow = "" }
+
+    bar.GetTypeInfo = function()
+        return FLAT_TYPE_INFO
+    end
+    bar.IsInterruptable = function()
+        return true
+    end
+    bar.PlayFinishAnim = function() end
+    bar.StopFinishAnims = function(self)
+        if self.HoldFadeOutAnim then self.HoldFadeOutAnim:Stop() end
+        if self.FadeOutAnim then self.FadeOutAnim:Stop() end
+        if self.Flash then self.Flash:SetAlpha(0) end
+    end
     bar.ShowSpark = function(self)
         if self.Spark then self.Spark:Show() end
     end
     bar.HideSpark = function(self)
         if self.Spark then self.Spark:Hide() end
-    end
-    bar.StopFinishAnims = function(self)
-        if self.HoldFadeOutAnim then self.HoldFadeOutAnim:Stop() end
-        if self.FadeOutAnim then self.FadeOutAnim:Stop() end
-        if self.Flash then self.Flash:SetAlpha(0) end
     end
 
     bar:SetStatusBarTexture(BAR_TEXTURE)
