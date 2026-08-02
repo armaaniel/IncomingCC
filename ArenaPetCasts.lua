@@ -9,14 +9,6 @@ local NUM_BARS = #UNITS
 
 local BAR_TEXTURE = "Interface\\TargetingFrame\\UI-StatusBar"
 
--- Blizzard's template ships a lot of art we don't want. These are hidden if
--- present; the list is defensive because region names change between builds.
-local ART_REGIONS = {
-    "Background", "BaseGlow", "Border", "BorderMask", "ChannelShadow",
-    "CraftGlow", "CraftingMask", "DropShadow", "EnergyGlow", "EnergyMask",
-    "Shine", "StandardGlow", "TextBorder", "WispGlow", "WispMask",
-}
-
 -- Classes that can bring a pet into arena. Only warlock is on by default.
 local PET_CLASSES = {
     "WARLOCK", "HUNTER", "MAGE", "DEATHKNIGHT",
@@ -47,6 +39,8 @@ local previewing = false
 local db
 
 local ApplyLayout, ApplyStyle, SetPreview
+local PositionBars, ClaimSlot, ReleaseSlot, ClearSlots
+local slots = {}
 
 --------------------------------------------------------------------------------
 -- Bars
@@ -57,36 +51,67 @@ local ApplyLayout, ApplyStyle, SetPreview
 -- resolves PlayerIsSpellTarget internally. It runs untainted, so it is allowed
 -- to read secret values that addon code cannot touch. We only restyle it.
 local function CreateBar(index)
+    -- Inherit only the animation template and mix in the methods, exactly as
+    -- sArena does. Inheriting CastingBarFrameTemplate instead grafts an addon
+    -- frame onto Blizzard's own player castbar object, which taints it and
+    -- produces "Interface action failed because of an addon".
     local bar = CreateFrame(
         "StatusBar",
         "ArenaPetCastBar" .. index,
         container,
-        "CastingBarFrameTemplate"
+        "CastingBarFrameAnimsTemplate"
     )
-
-    for _, key in ipairs(ART_REGIONS) do
-        local region = bar[key]
-        if region and region.Hide then region:Hide() end
-    end
+    Mixin(bar, CastingBarMixin)
 
     bar:SetStatusBarTexture(BAR_TEXTURE)
-    bar:Hide()
 
-    -- Our own flat background behind the fill.
     local bg = bar:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
     bg:SetColorTexture(0, 0, 0, 1)
-    bar.ourBG = bg
+    bar.Background = bg
 
-    -- Regions dimmed together when the cast is not aimed at us. The background
-    -- is deliberately excluded so its own opacity setting still applies.
-    bar.dimRegions = { bar:GetStatusBarTexture() }
-    for _, key in ipairs({ "Icon", "Spark", "Text", "CastTimeText", "BorderShield" }) do
-        if bar[key] then bar.dimRegions[#bar.dimRegions + 1] = bar[key] end
-    end
+    local shield = bar:CreateTexture(nil, "ARTWORK")
+    shield:SetTexture("Interface\\CastingBar\\UI-CastingBar-Arena-Shield")
+    shield:SetSize(42, 42)
+    shield:SetPoint("LEFT", bar, "LEFT", -25, 0)
+    shield:Hide()
+    bar.BorderShield = shield
 
-    -- Blizzard sets this from PlayerIsSpellTarget on its own schedule. Hooking
-    -- it lets us mirror that secret boolean into alpha without ever reading it.
+    local text = bar:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    text:SetAllPoints()
+    bar.Text = text
+
+    local icon = bar:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(16, 16)
+    icon:SetPoint("RIGHT", bar, "LEFT", -5, 0)
+    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    bar.Icon = icon
+
+    local spark = bar:CreateTexture(nil, "OVERLAY")
+    spark:SetTexture("Interface\\CastingBar\\UI-CastingBar-Spark")
+    spark:SetBlendMode("ADD")
+    spark:SetSize(16, 30)
+    spark:SetPoint("CENTER")
+    bar.Spark = spark
+
+    -- sArena's XML notes this one is required for the generic unit frame code
+    -- to behave, even though we never show it.
+    local flash = bar:CreateTexture(nil, "OVERLAY")
+    flash:SetBlendMode("ADD")
+    flash:SetSize(256, 64)
+    flash:SetPoint("TOP", bar, "TOP", 0, 28)
+    bar.Flash = flash
+
+    -- The mixin's scripts are not attached by Mixin(); they have to be wired
+    -- up the way the XML does it.
+    bar:SetScript("OnEvent", bar.OnEvent)
+    bar:SetScript("OnUpdate", bar.OnUpdate)
+    bar:SetScript("OnShow", bar.OnShow)
+    bar:OnLoad(nil, true, false)
+    bar:Hide()
+
+    bar.dimRegions = { bar:GetStatusBarTexture(), icon, spark, text, shield }
+
     if bar.SetIsHighlightedCastTarget then
         hooksecurefunc(bar, "SetIsHighlightedCastTarget", function(self, isTarget)
             if previewing or not db.onlyAtMe then return end
@@ -95,26 +120,66 @@ local function CreateBar(index)
                 if region.SetAlphaFromBoolean then
                     ok = pcall(region.SetAlphaFromBoolean, region, isTarget, 1, 0)
                 end
-                -- If the secret-safe setter is missing or refuses the value,
-                -- leave the region visible rather than stuck at alpha 0.
                 if not ok then region:SetAlpha(1) end
             end
         end)
     end
 
+    bar:HookScript("OnShow", function(self)
+        if previewing then return end
+        ClaimSlot(self)
+    end)
+    bar:HookScript("OnHide", function(self)
+        if previewing then return end
+        ReleaseSlot(self)
+    end)
+
     return bar
 end
 
--- Anchors a list of bars consecutively from the top of the container. Bars are
--- positioned by how many are actually in use, not by their arena index, so a
--- lone warlock pet always renders in the top slot rather than leaving gaps.
-local function PositionBars(active)
+-- Slots are claimed in cast order and held until that cast ends. A freed slot
+-- is left as a hole rather than compacted, so a surviving bar keeps its
+-- position instead of sliding up while you are reading it.
+function PositionBars()
     local h, gap = db.barHeight, db.barGap
-    for i, bar in ipairs(active) do
-        bar:ClearAllPoints()
-        bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -((i - 1) * (h + gap)))
+    local count = 0
+    for i, bar in ipairs(slots) do
+        if bar then
+            bar:ClearAllPoints()
+            bar:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -((i - 1) * (h + gap)))
+            count = i
+        end
     end
-    container:SetHeight(math.max(1, #active) * (h + gap))
+    container:SetHeight(math.max(1, count) * (h + gap))
+end
+
+function ClaimSlot(bar)
+    for _, b in ipairs(slots) do
+        if b == bar then return end
+    end
+    local target = #slots + 1
+    for i, b in ipairs(slots) do
+        if not b then target = i break end
+    end
+    slots[target] = bar
+    PositionBars()
+end
+
+function ReleaseSlot(bar)
+    local found
+    for i, b in ipairs(slots) do
+        if b == bar then slots[i] = false found = true break end
+    end
+    if not found then return end
+    while #slots > 0 and not slots[#slots] do
+        slots[#slots] = nil
+    end
+    PositionBars()
+end
+
+function ClearSlots()
+    wipe(slots)
+    PositionBars()
 end
 
 function ApplyLayout()
@@ -144,7 +209,7 @@ function ApplyStyle()
     for i = 1, NUM_BARS do
         local bar = bars[i]
         bar:SetStatusBarColor(c[1], c[2], c[3])
-        bar.ourBG:SetAlpha(db.bgAlpha)
+        bar.Background:SetAlpha(db.bgAlpha)
 
         -- With the filter off nothing dims the bar, so make sure a previous
         -- dimming pass isn't left over.
@@ -210,8 +275,6 @@ end
 local function RefreshUnits()
     if previewing then return end
 
-    local active = {}
-
     for i = 1, NUM_BARS do
         local bar = bars[i]
         local wanted = UNITS[i]
@@ -231,11 +294,10 @@ local function RefreshUnits()
             if bar.SetHighlightWhenCastTarget then
                 bar:SetHighlightWhenCastTarget(db.onlyAtMe)
             end
-            active[#active + 1] = bar
         end
     end
 
-    PositionBars(active)
+    ClearSlots()
 end
 
 --------------------------------------------------------------------------------
@@ -269,7 +331,9 @@ function SetPreview(enabled)
     previewing = enabled
 
     if enabled then
-        PositionBars(bars)
+        wipe(slots)
+        for i = 1, NUM_BARS do slots[i] = bars[i] end
+        PositionBars()
     end
 
     for i = 1, NUM_BARS do
@@ -519,7 +583,9 @@ SlashCmdList.ARENAPETCASTS = function(msg)
             bar:SetHighlightWhenCastTarget(db.onlyAtMe)
         end
         bar:Hide()
-        PositionBars({ bar })
+        wipe(slots)
+        slots[1] = bar
+        PositionBars()
         Print("bar 1 bound to " .. unit .. " - cast at something, or /apc lock to undo")
 
     elseif msg == "status" then
