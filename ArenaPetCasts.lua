@@ -37,18 +37,49 @@ local defaults = {
     locked      = true,
 }
 
+local debugging = false
+
+local function Debug(fmt, ...)
+    if debugging then
+        print("|cff66ccffAPC|r " .. string.format(fmt, ...))
+    end
+end
+
 local bars, visible, classCache = {}, {}, {}
 local container, db, settingsCategory
-local ApplyLayout, ApplyStyle, OpenColorPicker, Restack
+local ApplyLayout, ApplyStyle, OpenColorPicker, Restack, ApplyTargetAlpha
 
 --------------------------------------------------------------------------------
 -- Owner class
 --------------------------------------------------------------------------------
 
+-- Warlock pet creature families. UnitCreatureFamily is localised, so this only
+-- matches on an English client; the owner-class lookup below is the fallback
+-- and stays authoritative when it resolves.
+local WARLOCK_FAMILIES = {
+    ["Imp"] = true, ["Fel Imp"] = true,
+    ["Voidwalker"] = true, ["Voidlord"] = true,
+    ["Succubus"] = true, ["Sayaad"] = true, ["Incubus"] = true, ["Shivarra"] = true,
+    ["Felhunter"] = true, ["Observer"] = true, ["Darkhound"] = true,
+    ["Felguard"] = true, ["Wrathguard"] = true,
+    ["Doomguard"] = true, ["Terrorguard"] = true,
+    ["Infernal"] = true, ["Abyssal"] = true,
+}
+
 -- Resolved once per match. Spec data lands during prep and stays valid, so
 -- re-deriving it on every roster event risks a lookup that worked at prep
 -- failing later and hiding a bar mid-game.
-local function IsWarlock(index)
+local function IsWarlock(index, unit)
+    -- The pet itself is the most direct evidence, and unlike the owner's class
+    -- it does not depend on arena spec data having arrived.
+    if unit and UnitCreatureFamily then
+        local family = UnitCreatureFamily(unit)
+        if family and not issecretvalue(family) then
+            Debug("%s: creature family %s", unit, family)
+            return WARLOCK_FAMILIES[family] == true
+        end
+    end
+
     local cached = classCache[index]
     if cached ~= nil then return cached == "WARLOCK" end
 
@@ -110,7 +141,7 @@ local function CreateBar()
     text:SetPoint("RIGHT", bar, "RIGHT", -42, 0)
 
     -- Dimmed together when the cast is not aimed at us.
-    bar.regions = { bar:GetStatusBarTexture(), icon, text, timer }
+    bar.regions = { bar:GetStatusBarTexture(), icon, text, timer, bg }
     return bar
 end
 
@@ -150,11 +181,32 @@ end
 
 local RegisterPetEvents
 local testUnit  -- set by /apc testunit; bypasses the warlock filter
-local debugging = false
 
-local function Debug(fmt, ...)
-    if debugging then
-        print("|cff66ccffAPC|r " .. string.format(fmt, ...))
+-- sArena re-evaluates this on every castbar event rather than once, because the
+-- cast's target is not necessarily resolved the instant the cast begins. This
+-- runs on the same tick that drives the timer.
+function ApplyTargetAlpha(bar, unit)
+    local function fallback()
+        for _, region in ipairs(bar.regions) do
+            region:SetAlpha(region == bar.bg and db.bgAlpha or 1)
+        end
+    end
+
+    if not (db.onlyAtMe and PlayerIsSpellTarget) then
+        return fallback()
+    end
+
+    local ok, isTarget = pcall(PlayerIsSpellTarget, unit)
+    if not ok then return fallback() end
+
+    for _, region in ipairs(bar.regions) do
+        local on = (region == bar.bg) and db.bgAlpha or 1
+        -- A missing setter is a failure, not something to skip. Skipping left
+        -- the alpha untouched, so every bar stayed visible.
+        if not region.SetAlphaFromBoolean then return fallback() end
+        if not pcall(region.SetAlphaFromBoolean, region, isTarget, on, 0) then
+            return fallback()
+        end
     end
 end
 
@@ -170,6 +222,7 @@ ticker:SetScript("OnUpdate", function()
             -- covers the spell the addon mostly exists for.
             bar:SetValue(bar.channeling and (1 - progress) or progress)
             bar.timer:SetFormattedText("%.1f", elapsed)
+            if bar.unitToken then ApplyTargetAlpha(bar, bar.unitToken) end
             any = true
         end
     end
@@ -177,7 +230,7 @@ ticker:SetScript("OnUpdate", function()
 end)
 
 local function ShowCast(index, unit)
-    if unit ~= testUnit and not IsWarlock(index) then
+    if unit ~= testUnit and not IsWarlock(index, unit) then
         Debug("%s: blocked by class filter (saw %s)", unit, tostring(classCache[index]))
         return
     end
@@ -215,29 +268,12 @@ local function ShowCast(index, unit)
         bar:SetStatusBarColor(db.color[1], db.color[2], db.color[3])
     end
 
-    -- Alpha carries "is it aimed at me". Two conditions, two properties, so
-    -- they never have to be combined in Lua - which isn't possible anyway.
-    local dimmed = false
-    if db.onlyAtMe and PlayerIsSpellTarget then
-        local ok, isTarget = pcall(PlayerIsSpellTarget, unit)
-        if ok then
-            dimmed = true
-            for _, region in ipairs(bar.regions) do
-                if region.SetAlphaFromBoolean then
-                    if not pcall(region.SetAlphaFromBoolean, region, isTarget, 1, 0) then
-                        dimmed = false
-                    end
-                end
-            end
-        end
-    end
-    if not dimmed then
-        for _, region in ipairs(bar.regions) do region:SetAlpha(1) end
-    end
+    ApplyTargetAlpha(bar, unit)
 
     -- GetTime() is not secret, so elapsed time can be measured even though the
     -- cast's own start and end stamps cannot be read.
     bar.startedAt = GetTime()
+    bar.unitToken = unit
     bar.channeling = channeling
     bar:SetValue(channeling and 1 or 0)
     bar.timer:SetText("0.0")
@@ -251,9 +287,23 @@ end
 local function HideCast(index)
     visible[index] = false
     bars[index].startedAt = nil
+    bars[index].unitToken = nil
     bars[index].channeling = nil
     bars[index]:Hide()
     Restack()
+end
+
+-- Hides only bars whose unit has genuinely stopped casting. Roster events fire
+-- constantly mid-match, and blanket-hiding on them kills bars for casts that
+-- are still in progress. Nil tests on secrets are permitted, so this can ask
+-- whether a cast exists without reading it.
+local function PruneStale()
+    for i, unit in ipairs(UNITS) do
+        if visible[i] and not UnitCastingInfo(unit) and not UnitChannelInfo(unit) then
+            Debug("%s: pruned, no longer casting", unit)
+            HideCast(i)
+        end
+    end
 end
 
 local function HideAll()
@@ -460,11 +510,18 @@ f:SetScript("OnEvent", function(self, event, arg1)
         if not testUnit then RegisterPetEvents() end
 
     else
-        if event == "PLAYER_ENTERING_WORLD" then wipe(classCache) end
         -- Rebind on every roster change: the tokens only resolve once the
         -- units actually exist.
         if not testUnit and not debugging then RegisterPetEvents() end
-        if db.locked then HideAll() end
+
+        if event == "PLAYER_ENTERING_WORLD" then
+            wipe(classCache)
+            if db.locked then HideAll() end
+        else
+            -- ARENA_OPPONENT_UPDATE fires many times per match. Only drop bars
+            -- whose cast has actually ended.
+            if db.locked then PruneStale() end
+        end
     end
 end)
 
