@@ -149,6 +149,13 @@ function Restack()
 end
 
 local testUnit  -- set by /apc testunit; bypasses the warlock filter
+local debugging = false
+
+local function Debug(fmt, ...)
+    if debugging then
+        print("|cff66ccffAPC|r " .. string.format(fmt, ...))
+    end
+end
 
 local ticker = CreateFrame("Frame")
 ticker:Hide()
@@ -169,7 +176,10 @@ ticker:SetScript("OnUpdate", function()
 end)
 
 local function ShowCast(index, unit)
-    if unit ~= testUnit and not IsWarlock(index) then return end
+    if unit ~= testUnit and not IsWarlock(index) then
+        Debug("%s: blocked by class filter (saw %s)", unit, tostring(classCache[index]))
+        return
+    end
 
     local channeling = false
     local name, _, texture, _, _, _, _, _, spellID = UnitCastingInfo(unit)
@@ -178,7 +188,11 @@ local function ShowCast(index, unit)
         channeling = true
         name, _, texture, _, _, _, _, spellID = UnitChannelInfo(unit)
     end
-    if not name then return end   -- nil tests on secrets are permitted
+    if not name then
+        Debug("%s: event fired but no cast info", unit)
+        return
+    end
+    Debug("%s: showing (channel=%s)", unit, tostring(channeling))
 
     local bar = bars[index]
     bar.icon:SetTexture(texture)
@@ -413,6 +427,10 @@ f:SetScript("OnEvent", function(self, event, arg1)
         return
     end
 
+    if START[event] or STOP[event] then
+        Debug("event %s unit=%s", event, tostring(arg1))
+    end
+
     if START[event] then
         local i = indexOf[arg1]
         if i and db.locked then ShowCast(i, arg1) end
@@ -469,11 +487,50 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         print("|cffffb300ArenaPetCasts|r bar 1 bound to " .. unit
             .. " - find something casting. /apc testunit off to undo")
 
+    elseif msg == "debug" then
+        debugging = not debugging
+        for event in pairs(START) do f:UnregisterEvent(event) end
+        for event in pairs(STOP)  do f:UnregisterEvent(event) end
+        if debugging then
+            -- Unfiltered: logs every unit the game reports, which reveals
+            -- whether arenapet tokens ever appear in these events.
+            for event in pairs(START) do f:RegisterEvent(event) end
+            for event in pairs(STOP)  do f:RegisterEvent(event) end
+            print("|cff66ccffAPC|r debug ON - all spellcast units will be logged")
+            print("  run an arena, then /apc debug again to turn it off")
+        else
+            for event in pairs(START) do
+                for _, u in ipairs(UNITS) do f:RegisterUnitEvent(event, u) end
+            end
+            for event in pairs(STOP) do
+                for _, u in ipairs(UNITS) do f:RegisterUnitEvent(event, u) end
+            end
+            print("|cff66ccffAPC|r debug OFF")
+        end
+
+    elseif msg == "units" then
+        for i, u in ipairs(UNITS) do
+            print(string.format("|cff66ccffAPC|r %s exists=%s name=%s  owner arena%d exists=%s class=%s",
+                u, tostring(UnitExists(u)), tostring(UnitName(u)), i,
+                tostring(UnitExists("arena" .. i)), tostring(classCache[i])))
+        end
+        print(string.format("|cff66ccffAPC|r opponent specs = %s",
+            tostring(GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs())))
+
     elseif msg == "reset" then
         db.point = nil
         container:ClearAllPoints()
         container:SetPoint("CENTER", UIParent, "CENTER", 0, 150)
         print("|cffffb300ArenaPetCasts|r position reset")
+    elseif msg == "help" or msg == "?" then
+        print("|cffffb300ArenaPetCasts|r commands:")
+        print("  /apc                 open settings")
+        print("  /apc unlock / lock   move the bars")
+        print("  /apc reset           recentre")
+        print("  /apc testunit target bind bar 1 to your target (test outside arena)")
+        print("  /apc testunit off    undo the test binding")
+        print("  /apc debug           log every spellcast unit (for arena issues)")
+        print("  /apc units           check whether arenapet tokens exist")
     else
         if settingsCategory then Settings.OpenToCategory(settingsCategory:GetID()) end
     end
