@@ -451,13 +451,14 @@ local f = CreateFrame("Frame")
 -- filter attached to nothing. sArena re-registers from its per-frame setup for
 -- the same reason, and additionally watches UNIT_PET on each owner to catch
 -- the moment an opponent's pet appears.
+-- Registered unfiltered. RegisterUnitEvent's filter appears to resolve against
+-- whether the unit currently exists, and arena opponents read as non-existent
+-- whenever they are out of visual range - which is most of a match. Comparing
+-- the token here instead removes that dependency; the cost is a table lookup
+-- per cast in the world.
 function RegisterPetEvents()
-    for event in pairs(START) do
-        for _, unit in ipairs(UNITS) do f:RegisterUnitEvent(event, unit) end
-    end
-    for event in pairs(STOP) do
-        for _, unit in ipairs(UNITS) do f:RegisterUnitEvent(event, unit) end
-    end
+    for event in pairs(START) do f:RegisterEvent(event) end
+    for event in pairs(STOP)  do f:RegisterEvent(event) end
     for i = 1, #UNITS do
         f:RegisterUnitEvent("UNIT_PET", "arena" .. i)
     end
@@ -513,8 +514,17 @@ f:SetScript("OnEvent", function(self, event, arg1)
     end
 
     if START[event] or STOP[event] then
-        Debug("EVENT %s unit=%s mapped=%s locked=%s",
-            event, tostring(arg1), tostring(indexOf[arg1]), tostring(db and db.locked))
+        -- Log every unit the game reports a cast for while in an arena. If an
+        -- arenapet token never appears here, the game is not reporting pet
+        -- casts at all and no amount of filtering will help.
+        local _, instanceType = IsInInstance()
+        if instanceType == "arena" and arg1 ~= "player" then
+            Debug("CAST %s unit=%s mapped=%s", event, tostring(arg1),
+                tostring(indexOf[arg1] or "-"))
+        end
+
+        -- Not one of ours: nothing further to do.
+        if not indexOf[arg1] then return end
     end
 
     if START[event] then
@@ -611,8 +621,9 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         indexOf[unit] = 1
         -- RegisterUnitEvent replaces the unit filter for that event, so the
         -- pet tokens go back on when the test is cleared.
-        for event in pairs(START) do f:RegisterUnitEvent(event, unit) end
-        for event in pairs(STOP)  do f:RegisterUnitEvent(event, unit) end
+        indexOf[unit] = 1
+        for event in pairs(START) do f:RegisterEvent(event) end
+        for event in pairs(STOP)  do f:RegisterEvent(event) end
         print("|cffffb300ArenaPetCasts|r bar 1 bound to " .. unit
             .. " - find something casting. /apc testunit off to undo")
 
