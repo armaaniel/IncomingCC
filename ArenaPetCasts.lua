@@ -53,55 +53,52 @@ local ApplyLayout, ApplyStyle, OpenColorPicker, Restack, ApplyTargetAlpha
 -- Owner class
 --------------------------------------------------------------------------------
 
--- Warlock pet creature families. UnitCreatureFamily is localised, so this only
--- matches on an English client; the owner-class lookup below is the fallback
--- and stays authoritative when it resolves.
-local WARLOCK_FAMILIES = {
-    ["Imp"] = true, ["Fel Imp"] = true,
-    ["Voidwalker"] = true, ["Voidlord"] = true,
-    ["Succubus"] = true, ["Sayaad"] = true, ["Incubus"] = true, ["Shivarra"] = true,
-    ["Felhunter"] = true, ["Observer"] = true, ["Darkhound"] = true,
-    ["Felguard"] = true, ["Wrathguard"] = true,
-    ["Doomguard"] = true, ["Terrorguard"] = true,
-    ["Infernal"] = true, ["Abyssal"] = true,
-}
-
 -- Resolved once per match. Spec data lands during prep and stays valid, so
 -- re-deriving it on every roster event risks a lookup that worked at prep
 -- failing later and hiding a bar mid-game.
-local function IsWarlock(index, unit)
-    -- The pet itself is the most direct evidence, and unlike the owner's class
-    -- it does not depend on arena spec data having arrived.
-    if unit and UnitCreatureFamily then
-        local family = UnitCreatureFamily(unit)
-        if family and not issecretvalue(family) then
-            Debug("%s: creature family %s", unit, family)
-            return WARLOCK_FAMILIES[family] == true
-        end
-    end
+-- Resolves and caches an opponent's class token. Class tokens ("WARLOCK") are
+-- identical in every locale, unlike creature family names.
+--
+-- Called eagerly on prep and roster events rather than lazily at cast time:
+-- GetNumArenaOpponentSpecs only answers once spec data has arrived, and by the
+-- time a pet is casting mid-match that window may have closed. sArena resolves
+-- on ARENA_PREP_OPPONENT_SPECIALIZATIONS for the same reason.
+local function ResolveClasses()
+    for i = 1, #UNITS do
+        if not classCache[i] then
+            if GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs() >= i then
+                local specID = GetArenaOpponentSpec(i) or 0
+                if specID > 0 then
+                    local _, _, _, _, _, classFile = GetSpecializationInfoByID(specID)
+                    if classFile then
+                        classCache[i] = classFile
+                        Debug("arena%d resolved as %s (spec)", i, classFile)
+                    end
+                end
+            end
 
-    local cached = classCache[index]
-    if cached ~= nil then return cached == "WARLOCK" end
-
-    if GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs() >= index then
-        local specID = GetArenaOpponentSpec(index) or 0
-        if specID > 0 then
-            local _, _, _, _, _, classFile = GetSpecializationInfoByID(specID)
-            if classFile then
-                classCache[index] = classFile
-                return classFile == "WARLOCK"
+            if not classCache[i] and UnitClassBase then
+                local class = UnitClassBase("arena" .. i)
+                if class and not issecretvalue(class) then
+                    classCache[i] = class
+                    Debug("arena%d resolved as %s (unit)", i, class)
+                end
             end
         end
     end
+end
 
-    local class = UnitClassBase and UnitClassBase("arena" .. index)
-    if class and not issecretvalue(class) then
-        classCache[index] = class
-        return class == "WARLOCK"
-    end
+local function IsWarlock(index)
+    local class = classCache[index]
+    if class then return class == "WARLOCK" end
 
-    -- Unresolved: show it. A stray bar beats silently showing nothing, and the
-    -- class usually resolves a moment later.
+    -- One last attempt in case the pet cast before prep data landed.
+    ResolveClasses()
+    class = classCache[index]
+    if class then return class == "WARLOCK" end
+
+    -- Still unknown: show it. A stray bar beats silently showing nothing.
+    Debug("arena%d class unresolved - showing anyway", index)
     return true
 end
 
@@ -230,7 +227,7 @@ ticker:SetScript("OnUpdate", function()
 end)
 
 local function ShowCast(index, unit)
-    if unit ~= testUnit and not IsWarlock(index, unit) then
+    if unit ~= testUnit and not IsWarlock(index) then
         Debug("%s: blocked by class filter (saw %s)", unit, tostring(classCache[index]))
         return
     end
@@ -449,6 +446,7 @@ end
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("ARENA_OPPONENT_UPDATE")
+f:RegisterEvent("ARENA_PREP_OPPONENT_SPECIALIZATIONS")
 
 f:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
@@ -517,7 +515,12 @@ f:SetScript("OnEvent", function(self, event, arg1)
         if event == "PLAYER_ENTERING_WORLD" then
             wipe(classCache)
             if db.locked then HideAll() end
+            ResolveClasses()
         else
+            -- Prep is when spec data arrives, so resolve here rather than
+            -- waiting until a pet casts.
+            ResolveClasses()
+
             -- ARENA_OPPONENT_UPDATE fires many times per match. Only drop bars
             -- whose cast has actually ended.
             if db.locked then PruneStale() end
