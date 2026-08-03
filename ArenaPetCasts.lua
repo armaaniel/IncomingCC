@@ -34,6 +34,7 @@ local defaults = {
     showChannels = false,
 
     onlyAtMe    = true,
+    anyPetClass = false,
     locked      = true,
 }
 
@@ -97,6 +98,11 @@ local function ResolveClasses()
 end
 
 local function IsWarlock(index)
+    -- Testing aid: accepts any pet so the rest of the pipeline - target check,
+    -- crowd control colouring, the bar itself - can be exercised without
+    -- waiting to be matched against a warlock.
+    if db and db.anyPetClass then return true end
+
     local class = classCache[index]
     if class then return class == "WARLOCK" end
 
@@ -261,7 +267,8 @@ local function ShowCast(index, unit)
         Debug("%s: event fired but no cast info", unit)
         return
     end
-    Debug("%s: showing (channel=%s)", unit, tostring(channeling))
+    Debug("%s: PASSED filter, showing (channel=%s, class=%s)",
+        unit, tostring(channeling), tostring(classCache[index]))
 
     local bar = bars[index]
     bar.icon:SetTexture(texture)
@@ -391,6 +398,8 @@ local function BuildSettings()
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Behaviour"))
     AddCheck(cat, "onlyAtMe", "Only Casts At Me",
         "Hide bars for pet casts aimed at someone else.")
+    AddCheck(cat, "anyPetClass", "Any Pet Class (testing)",
+        "Show bars for every pet, not just warlock pets. For verifying the addon works when no warlock is available.")
     AddCheck(cat, "showChannels", "Show Channels",
         "Show bars while a pet is channelling. Off by default: the channel begins after the crowd control has already landed.")
 
@@ -643,6 +652,12 @@ SlashCmdList.ARENAPETCASTS = function(msg)
             print("|cff66ccffAPC|r debug OFF")
         end
 
+    elseif msg == "any" then
+        db.anyPetClass = not db.anyPetClass
+        print(string.format("|cff66ccffAPC|r any pet class = %s%s",
+            tostring(db.anyPetClass),
+            db.anyPetClass and " (testing - remember to turn off)" or ""))
+
     elseif msg:match("^log") then
         db.log = db.log or {}
         if msg:match("clear") then
@@ -683,6 +698,7 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         print("  /apc units           check whether arenapet tokens exist")
         print("  /apc log             show recent activity (saved to disk)")
         print("  /apc log clear       wipe the saved log")
+        print("  /apc any             toggle showing every pet class (testing)")
     else
         if settingsCategory then Settings.OpenToCategory(settingsCategory:GetID()) end
     end
