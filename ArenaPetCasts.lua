@@ -514,9 +514,28 @@ f:SetScript("OnEvent", function(self, event, arg1)
 
         if event == "PLAYER_ENTERING_WORLD" then
             wipe(classCache)
+
+            -- Being unlocked suppresses every cast bar. Leaving an arena in
+            -- that state would silently disable the addon for a whole game,
+            -- so entering an instance always re-locks.
+            local _, instanceType = IsInInstance()
+            if instanceType == "arena" and not db.locked then
+                Debug("entered arena while unlocked - re-locking")
+                SetLocked(true)
+            end
+
             if db.locked then HideAll() end
             ResolveClasses()
         else
+            if event == "ARENA_PREP_OPPONENT_SPECIALIZATIONS" then
+                -- Solo shuffle rotates opponents between rounds without a zone
+                -- change, so prep has to clear the cache as well as fill it.
+                -- Otherwise round two filters against round one's classes.
+                Debug("prep - clearing class cache")
+                wipe(classCache)
+                if db.locked then HideAll() end
+            end
+
             -- Prep is when spec data arrives, so resolve here rather than
             -- waiting until a pet casts.
             ResolveClasses()
@@ -590,8 +609,9 @@ SlashCmdList.ARENAPETCASTS = function(msg)
                 u, tostring(UnitExists(u)), tostring(UnitName(u)), i,
                 tostring(UnitExists("arena" .. i)), tostring(classCache[i])))
         end
-        print(string.format("|cff66ccffAPC|r opponent specs = %s",
-            tostring(GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs())))
+        print(string.format("|cff66ccffAPC|r opponent specs = %s  locked = %s  onlyAtMe = %s",
+            tostring(GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs()),
+            tostring(db.locked), tostring(db.onlyAtMe)))
 
     elseif msg == "reset" then
         db.point = nil
