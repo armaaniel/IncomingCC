@@ -37,16 +37,24 @@ local defaults = {
     locked      = true,
 }
 
+local db
 local debugging = false
+local MAX_LOG = 500
 
+-- Writes to saved variables so a session can be reviewed afterwards. Testing
+-- this live is impractical - it needs an arena, an enemy pet, and a cast aimed
+-- at you all at once - so the addon records its own reasoning instead.
 local function Debug(fmt, ...)
-    if debugging then
-        print("|cff66ccffAPC|r " .. string.format(fmt, ...))
-    end
+    local line = date("%H:%M:%S") .. "  " .. string.format(fmt, ...)
+    if debugging then print("|cff66ccffAPC|r " .. line) end
+    if not db then return end
+    db.log = db.log or {}
+    db.log[#db.log + 1] = line
+    while #db.log > MAX_LOG do table.remove(db.log, 1) end
 end
 
 local bars, visible, classCache = {}, {}, {}
-local container, db, settingsCategory
+local container, settingsCategory
 local ApplyLayout, ApplyStyle, OpenColorPicker, Restack, ApplyTargetAlpha
 
 --------------------------------------------------------------------------------
@@ -194,13 +202,23 @@ function ApplyTargetAlpha(bar, unit)
     end
 
     local ok, isTarget = pcall(PlayerIsSpellTarget, unit)
-    if not ok then return fallback() end
+    if not ok then
+        Debug("%s: PlayerIsSpellTarget errored - showing regardless", unit)
+        return fallback()
+    end
+    if not bar.loggedTarget then
+        bar.loggedTarget = true
+        Debug("%s: target check ok, secret=%s", unit, tostring(issecretvalue(isTarget)))
+    end
 
     for _, region in ipairs(bar.regions) do
         local on = (region == bar.bg) and db.bgAlpha or 1
         -- A missing setter is a failure, not something to skip. Skipping left
         -- the alpha untouched, so every bar stayed visible.
-        if not region.SetAlphaFromBoolean then return fallback() end
+        if not region.SetAlphaFromBoolean then
+            Debug("%s: SetAlphaFromBoolean missing - showing regardless", unit)
+            return fallback()
+        end
         if not pcall(region.SetAlphaFromBoolean, region, isTarget, on, 0) then
             return fallback()
         end
@@ -283,6 +301,7 @@ end
 
 local function HideCast(index)
     visible[index] = false
+    bars[index].loggedTarget = nil
     bars[index].startedAt = nil
     bars[index].unitToken = nil
     bars[index].channeling = nil
@@ -494,7 +513,8 @@ f:SetScript("OnEvent", function(self, event, arg1)
     end
 
     if START[event] or STOP[event] then
-        Debug("event %s unit=%s", event, tostring(arg1))
+        Debug("EVENT %s unit=%s mapped=%s locked=%s",
+            event, tostring(arg1), tostring(indexOf[arg1]), tostring(db and db.locked))
     end
 
     if START[event] then
@@ -512,7 +532,15 @@ f:SetScript("OnEvent", function(self, event, arg1)
         -- units actually exist.
         if not testUnit and not debugging then RegisterPetEvents() end
 
+        for i, u in ipairs(UNITS) do
+            Debug("%s: pet exists=%s  owner exists=%s  class=%s",
+                u, tostring(UnitExists(u)), tostring(UnitExists("arena" .. i)),
+                tostring(classCache[i]))
+        end
+
         if event == "PLAYER_ENTERING_WORLD" then
+            local _, it = IsInInstance()
+            Debug("=== PLAYER_ENTERING_WORLD  instanceType=%s ===", tostring(it))
             wipe(classCache)
 
             -- Being unlocked suppresses every cast bar. Leaving an arena in
@@ -531,7 +559,8 @@ f:SetScript("OnEvent", function(self, event, arg1)
                 -- Solo shuffle rotates opponents between rounds without a zone
                 -- change, so prep has to clear the cache as well as fill it.
                 -- Otherwise round two filters against round one's classes.
-                Debug("prep - clearing class cache")
+                Debug("=== PREP  specs=%s ===",
+                    tostring(GetNumArenaOpponentSpecs and GetNumArenaOpponentSpecs()))
                 wipe(classCache)
                 if db.locked then HideAll() end
             end
@@ -603,6 +632,20 @@ SlashCmdList.ARENAPETCASTS = function(msg)
             print("|cff66ccffAPC|r debug OFF")
         end
 
+    elseif msg:match("^log") then
+        db.log = db.log or {}
+        if msg:match("clear") then
+            wipe(db.log)
+            print("|cff66ccffAPC|r log cleared")
+            return
+        end
+        local n = #db.log
+        print(string.format("|cff66ccffAPC|r %d entries (showing last 25)", n))
+        for i = math.max(1, n - 24), n do print("  " .. db.log[i]) end
+        print("|cff66ccffAPC|r full log is saved to:")
+        print("  WTF\\Account\\<ACCOUNT>\\SavedVariables\\ArenaPetCasts.lua")
+        print("  (log is written on logout or /reload)")
+
     elseif msg == "units" then
         for i, u in ipairs(UNITS) do
             print(string.format("|cff66ccffAPC|r %s exists=%s name=%s  owner arena%d exists=%s class=%s",
@@ -627,6 +670,8 @@ SlashCmdList.ARENAPETCASTS = function(msg)
         print("  /apc testunit off    undo the test binding")
         print("  /apc debug           log every spellcast unit (for arena issues)")
         print("  /apc units           check whether arenapet tokens exist")
+        print("  /apc log             show recent activity (saved to disk)")
+        print("  /apc log clear       wipe the saved log")
     else
         if settingsCategory then Settings.OpenToCategory(settingsCategory:GetID()) end
     end
